@@ -17,23 +17,18 @@ logger = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle event handler: initializes DB tables on startup."""
-    logger.info("Initializing database schema...")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE keywords ADD COLUMN topic_context TEXT DEFAULT ''"))
-        except Exception:
-            pass
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE scraped_data ADD COLUMN is_owned_media BOOLEAN DEFAULT 0"))
-        except Exception:
-            pass
-    logger.info("Database schema initialized.")
+    from app.database import init_db, engine
+    logger.info("Initializing database schema on startup...")
+    try:
+        await init_db()
+    except Exception as e:
+        logger.error(f"Error during init_db: {e}", exc_info=True)
     yield
     logger.info("Shutting down backend service...")
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
 
 
 app = FastAPI(
