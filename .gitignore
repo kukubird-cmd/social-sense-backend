@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+socialsense.db
+test_out.txt
+tunnel_url.txt
+scratch_*
+bin/
