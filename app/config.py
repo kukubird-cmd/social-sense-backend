@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     # Defaults to local async SQLite for zero-config immediate execution,
     # or override with PostgreSQL: postgresql+asyncpg://postgres:pass@localhost:5432/db
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./socialsense.db")
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.DATABASE_URL.startswith("postgres://"):
+            self.DATABASE_URL = self.DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif self.DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in self.DATABASE_URL:
+            self.DATABASE_URL = self.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
     
     # External APIs
     APIFY_API_TOKEN: Optional[str] = os.getenv("APIFY_API_TOKEN", None)
