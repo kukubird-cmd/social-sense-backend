@@ -55,7 +55,7 @@ class TunnelStartRequest(BaseModel):
 
 
 class QuickScrapeRequest(BaseModel):
-    company_id: uuid.UUID
+    company_id: str
     keyword_string: str
     platforms: Optional[str] = "tiktok,instagram,twitter,reddit,youtube"
     limit: Optional[int] = 100
@@ -394,12 +394,18 @@ async def quick_scrape(
     if not clean_kw:
         raise HTTPException(status_code=400, detail="Keyword string cannot be empty.")
 
-    # 1. Create or retrieve existing keyword
+    # 1. Resolve company_id safely
+    try:
+        cid = uuid.UUID(str(req.company_id))
+    except (ValueError, AttributeError):
+        cid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    # 2. Create or retrieve existing keyword
     keyword_in = KeywordCreate(
         keyword_string=clean_kw,
         platform_flags=None
     )
-    keyword = await create_keyword_for_company(db, req.company_id, keyword_in)
+    keyword = await create_keyword_for_company(db, cid, keyword_in)
 
     # 2. Enforce single-keyword scraping concurrency
     _check_and_lock_scraper(keyword.id, keyword.keyword_string)
