@@ -152,55 +152,51 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             "billing_status": target_comp.billing_status
         }
 
-    # 3. Dedicated Isolated Company Auto-Provisioning for Brand New Accounts
-    # Determines clean company / brand name
-    if req.company_name and req.company_name.strip():
-        comp_name = req.company_name.strip()
-    elif "@" in clean_email:
-        domain_part = clean_email.split("@")[1].split(".")[0]
-        if domain_part.lower() in ["gmail", "yahoo", "hotmail", "outlook", "icloud", "mail", "proton"]:
-            user_part = clean_email.split("@")[0].replace(".", " ").replace("_", " ").title()
-            comp_name = f"{user_part}'s Brand"
-        else:
-            comp_name = domain_part.capitalize()
-    else:
-        comp_name = clean_email.capitalize()
+    # 3. Support Admin Sandbox demo login if not yet in database
+    elif clean_email == "admin@socialsense.ai":
+        admin_comp_id = uuid.UUID("99999999-9999-9999-9999-999999999999")
+        comp_stmt = select(Company).where(Company.id == admin_comp_id)
+        comp_res = await db.execute(comp_stmt)
+        target_comp = comp_res.scalar_one_or_none()
+        if not target_comp:
+            target_comp = Company(
+                id=admin_comp_id,
+                name="SocialSense Admin",
+                max_keywords=99,
+                billing_status="active"
+            )
+            db.add(target_comp)
+            await db.commit()
+            await db.refresh(target_comp)
 
-    # Create a fresh, isolated Company with 0 active keywords
-    new_company = Company(
-        id=uuid.uuid4(),
-        name=comp_name,
-        max_keywords=1, # 1 Active Keyword Plan per tenant
-        billing_status="active"
+        new_user = User(
+            id=uuid.uuid4(),
+            company_id=target_comp.id,
+            email=clean_email,
+            hashed_password=hash_pw(req.password),
+            role="admin",
+            is_active=True
+        )
+        db.add(new_user)
+        await db.commit()
+        await db.refresh(new_user)
+
+        return {
+            "status": "success",
+            "user_id": str(new_user.id),
+            "email": new_user.email,
+            "role": new_user.role,
+            "company_id": str(target_comp.id),
+            "company_name": target_comp.name,
+            "max_keywords": target_comp.max_keywords,
+            "billing_status": target_comp.billing_status
+        }
+
+    # 4. For any other unregistered email: STRICT ACCESS CONTROL - Reject!
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Account not found. Only registered company accounts can access this platform. Please contact your administrator to provision your company workspace."
     )
-    db.add(new_company)
-    await db.flush()
-
-    new_user = User(
-        id=uuid.uuid4(),
-        company_id=new_company.id,
-        email=clean_email,
-        hashed_password=hash_pw(req.password),
-        role="admin" if "admin" in clean_email else "client",
-        is_active=True
-    )
-    db.add(new_user)
-    await db.commit()
-    await db.refresh(new_company)
-    await db.refresh(new_user)
-
-    logger.info(f"✨ Auto-provisioned fresh isolated workspace for '{clean_email}' -> Company '{new_company.name}' ({new_company.id})")
-
-    return {
-        "status": "success",
-        "user_id": str(new_user.id),
-        "email": new_user.email,
-        "role": new_user.role,
-        "company_id": str(new_company.id),
-        "company_name": new_company.name,
-        "max_keywords": new_company.max_keywords,
-        "billing_status": new_company.billing_status
-    }
 
 
 @router.post("/provision-client", summary="Provision a new client company with customized login and keyword")

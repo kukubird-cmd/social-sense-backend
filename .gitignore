@@ -12,3 +12,5 @@ test_out.txt
 tunnel_url.txt
 scratch_*
 bin/
+*.db
+

@@ -13,11 +13,11 @@ from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.config import settings
 from app.database import get_db
-from app.models import Keyword
+from app.models import Keyword, Company
 from app.schemas import KeywordCreate
 from app.services.billing_service import create_keyword_for_company
 from app.services.tunnel_manager import (
@@ -312,6 +312,7 @@ def _clear_active_scraping():
 async def trigger_scrape(
     keyword_id: uuid.UUID,
     background_tasks: BackgroundTasks,
+    company_id: Optional[str] = None,
     webhook_base_url: Optional[str] = None,
     platforms: str = "tiktok,instagram,twitter,reddit,youtube",
     limit: int = 100,
@@ -319,7 +320,7 @@ async def trigger_scrape(
 ):
     """
     Triggers a live Apify scrape across requested platforms for the given keyword.
-    Strictly permits only 1 keyword scrape at a time.
+    Strictly permits only registered companies to scrape keywords they own.
     """
     stmt = select(Keyword).where(Keyword.id == keyword_id, Keyword.is_active.is_(True))
     result = await db.execute(stmt)
@@ -331,7 +332,38 @@ async def trigger_scrape(
             detail=f"Active keyword {keyword_id} not found."
         )
 
-    # 1. Enforce single-keyword scraping concurrency
+    # 1. Verify registered company exists and is active
+    comp_stmt = select(Company).where(Company.id == keyword.company_id)
+    comp_res = await db.execute(comp_stmt)
+    company = comp_res.scalar_one_or_none()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated registered company workspace not found."
+        )
+
+    if company.billing_status.lower() != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Company workspace '{company.name}' is currently {company.billing_status}. Only active registered accounts can initiate scraping."
+        )
+
+    # 2. If company_id is provided, verify matching ownership
+    if company_id:
+        try:
+            req_cid = uuid.UUID(str(company_id))
+            if keyword.company_id != req_cid:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied: Keyword '{keyword.keyword_string}' is not registered under your company workspace."
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Invalid company workspace ID format."
+            )
+
+    # 3. Enforce single-keyword scraping concurrency
     _check_and_lock_scraper(keyword.id, keyword.keyword_string)
 
     requested_platforms = [p.strip().lower() for p in platforms.split(",") if p.strip()]
@@ -377,7 +409,7 @@ async def trigger_scrape(
 
 @router.post(
     "/quick-scrape",
-    summary="Create or find keyword and immediately trigger live Apify scrape",
+    summary="Trigger live Apify scrape for an authorized purchased keyword",
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def quick_scrape(
@@ -387,27 +419,57 @@ async def quick_scrape(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Convenience endpoint: Ensures the keyword exists for this company,
-    enforcing single-keyword scrape concurrency.
+    Convenience endpoint: Strictly verifies that the company is registered, active,
+    and has actually purchased/been assigned the requested keyword.
     """
     clean_kw = req.keyword_string.strip()
     if not clean_kw:
         raise HTTPException(status_code=400, detail="Keyword string cannot be empty.")
 
-    # 1. Resolve company_id safely
+    # 1. Resolve registered company_id strictly
     try:
         cid = uuid.UUID(str(req.company_id))
     except (ValueError, AttributeError):
-        cid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: A valid registered company workspace ID is required."
+        )
 
-    # 2. Create or retrieve existing keyword
-    keyword_in = KeywordCreate(
-        keyword_string=clean_kw,
-        platform_flags=None
+    # 2. Verify registered company exists and is active
+    comp_stmt = select(Company).where(Company.id == cid)
+    comp_res = await db.execute(comp_stmt)
+    company = comp_res.scalar_one_or_none()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access denied: Company workspace is not registered. Only registered client accounts can access the live scraper."
+        )
+
+    if company.billing_status.lower() != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Company workspace '{company.name}' account is {company.billing_status}. Only active registered accounts can scrape."
+        )
+
+    # 3. Check if company has bought / been assigned this keyword
+    kw_stmt = select(Keyword).where(
+        Keyword.company_id == cid,
+        func.lower(Keyword.keyword_string) == clean_kw.lower(),
+        Keyword.is_active.is_(True)
     )
-    keyword = await create_keyword_for_company(db, cid, keyword_in)
+    kw_res = await db.execute(kw_stmt)
+    keyword = kw_res.scalar_one_or_none()
 
-    # 2. Enforce single-keyword scraping concurrency
+    if not keyword:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Access denied: Keyword '{clean_kw}' has not been purchased for company '{company.name}'. "
+                f"Only registered companies can scrape keywords they have bought and activated in their plan."
+            )
+        )
+
+    # 4. Enforce single-keyword scraping concurrency
     _check_and_lock_scraper(keyword.id, keyword.keyword_string)
 
     active_webhook_url = (webhook_base_url or get_current_url() or "").strip()

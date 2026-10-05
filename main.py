@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import engine, Base
-from app.routers import keywords, webhooks, ws, scraper, chat, auth
+from app.routers import keywords, webhooks, ws, scraper, chat, auth, admin
 
 # Configure structured logging
 logging.basicConfig(
@@ -54,6 +54,7 @@ app.include_router(ws.router)
 app.include_router(scraper.router)
 app.include_router(chat.router)
 app.include_router(auth.router)
+app.include_router(admin.router)
 
 
 @app.get("/", tags=["Root"])
