@@ -45,6 +45,11 @@ APIFY_ACTORS = {
 APIFY_BASE = "https://api.apify.com/v2"
 
 
+def _get_clean_token() -> str:
+    """Returns the Apify API token with all whitespace, newlines, and quotes strictly removed."""
+    return (settings.APIFY_API_TOKEN or "").strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
+
+
 class TunnelUpdateRequest(BaseModel):
     tunnel_url: str
 
@@ -186,7 +191,7 @@ async def _trigger_actor(
     Includes retry loop to prevent transient DNS or connection drops.
     """
     actor_id = APIFY_ACTORS[platform].replace("/", "~")
-    token = settings.APIFY_API_TOKEN
+    token = _get_clean_token()
     actor_input = _build_actor_input(platform, keyword_string, limit=limit)
 
     url = f"{APIFY_BASE}/acts/{actor_id}/runs?token={token}"
@@ -228,7 +233,7 @@ async def _poll_and_ingest_run(run_id: str, keyword_id: uuid.UUID, platform: str
     Monitors an Apify run until finished, then directly fetches the dataset
     and broadcasts to WebSockets. Does NOT require any public ngrok tunnel!
     """
-    token = settings.APIFY_API_TOKEN
+    token = _get_clean_token()
     max_wait_seconds = 180
     interval = 6
     elapsed = 0
@@ -375,7 +380,7 @@ async def trigger_scrape(
             detail=f"Unknown platforms: {invalid}. Valid: {list(APIFY_ACTORS.keys())}"
         )
 
-    if not settings.APIFY_API_TOKEN:
+    if not _get_clean_token():
         _clear_active_scraping()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -476,7 +481,7 @@ async def quick_scrape(
     requested_platforms = [p.strip().lower() for p in (req.platforms or "tiktok,instagram,twitter,reddit,youtube").split(",") if p.strip()]
     scrape_limit = req.limit or 100
     
-    if not settings.APIFY_API_TOKEN:
+    if not _get_clean_token():
         _clear_active_scraping()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -511,7 +516,7 @@ async def quick_scrape(
 async def get_scraping_status():
     """Returns whether scraping is actively underway locally or in the cloud, including the current keyword."""
     local_active = len(_ACTIVE_SCRAPE_TASKS) > 0
-    token = settings.APIFY_API_TOKEN
+    token = _get_clean_token()
     cloud_running = 0
 
     if token:
@@ -551,7 +556,7 @@ async def stop_all_scraping():
     _ACTIVE_SCRAPE_TASKS.clear()
 
     # 2. Abort cloud runs on Apify
-    token = settings.APIFY_API_TOKEN
+    token = _get_clean_token()
     aborted_runs = []
     if token:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -684,7 +689,7 @@ async def _launch_all_platforms(
 async def list_actors():
     """Returns the Apify Actor IDs configured for each social media platform."""
     return {
-        "apify_token_configured": bool(settings.APIFY_API_TOKEN),
+        "apify_token_configured": bool(_get_clean_token()),
         "actors": APIFY_ACTORS,
     }
 
@@ -704,14 +709,15 @@ async def get_run_status(keyword_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not keyword:
         raise HTTPException(status_code=404, detail="Keyword not found.")
 
-    if not settings.APIFY_API_TOKEN:
+    token = _get_clean_token()
+    if not token:
         return {"error": "APIFY_API_TOKEN not configured", "runs": []}
 
     runs_summary = {}
     async with httpx.AsyncClient(timeout=15.0) as client:
         for platform, actor_id in APIFY_ACTORS.items():
             try:
-                url = f"{APIFY_BASE}/acts/{actor_id}/runs?token={settings.APIFY_API_TOKEN}&limit=2"
+                url = f"{APIFY_BASE}/acts/{actor_id}/runs?token={token}&limit=2"
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     data = resp.json().get("data", {}).get("items", [])

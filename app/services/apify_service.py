@@ -62,12 +62,13 @@ def check_is_owned_media(text: str, author: str, item: Dict[str, Any]) -> bool:
 
 async def fetch_apify_dataset_items(dataset_id: str) -> List[Dict[str, Any]]:
     """Fetch raw scraped items from Apify's Dataset REST API."""
-    if not settings.APIFY_API_TOKEN:
+    token = (settings.APIFY_API_TOKEN or "").strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
+    if not token:
         logger.error("APIFY_API_TOKEN is not configured.")
         return []
 
     url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-    params = {"token": settings.APIFY_API_TOKEN, "limit": 1000}
+    params = {"token": token, "limit": 1000}
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
