@@ -648,6 +648,15 @@ async def _launch_all_platforms(
                     poller_task.add_done_callback(lambda t: _ACTIVE_SCRAPE_TASKS.discard(t))
             except Exception as e:
                 logger.error(f"❌ Failed to trigger Apify [{platform}] for '{keyword_string}': {e}")
+                try:
+                    from app.websocket_manager import ws_manager
+                    await ws_manager.broadcast_to_all({
+                        "event": "SCRAPING_ERROR",
+                        "platform": platform,
+                        "error": str(e)
+                    })
+                except Exception:
+                    pass
             # Brief delay to respect Apify account concurrency thresholds
             await asyncio.sleep(1.5)
     except asyncio.CancelledError:
