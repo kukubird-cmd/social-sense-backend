@@ -750,7 +750,7 @@ async def get_run_status(keyword_id: uuid.UUID, db: AsyncSession = Depends(get_d
         for platform, actor_id in APIFY_ACTORS.items():
             try:
                 safe_actor = actor_id.replace("/", "~")
-                url = f"{APIFY_BASE}/acts/{safe_actor}/runs?token={token}&limit=2"
+                url = f"{APIFY_BASE}/acts/{safe_actor}/runs?token={token}&desc=true&limit=2"
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     data = resp.json().get("data", {}).get("items", [])
