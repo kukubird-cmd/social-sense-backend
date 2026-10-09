@@ -85,7 +85,8 @@ async def list_clients(
                 "id": str(primary_user.id),
                 "email": primary_user.email,
                 "role": primary_user.role,
-                "is_active": primary_user.is_active
+                "is_active": primary_user.is_active,
+                "initial_password": getattr(primary_user, "initial_password", None) or ""
             } if primary_user else None,
             "assigned_keywords": [
                 {
@@ -104,6 +105,33 @@ async def list_clients(
         "total_clients": len(clients_list),
         "clients": clients_list
     }
+
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str
+
+
+@router.post("/clients/{company_id}/reset-password", summary="Admin: Reset or update client login password")
+async def admin_reset_client_password(
+    company_id: uuid.UUID,
+    req: AdminResetPasswordRequest,
+    is_admin: bool = Depends(verify_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(User).where(User.company_id == company_id)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Client user not found.")
+    
+    clean_pwd = req.new_password.strip()
+    if not clean_pwd:
+        raise HTTPException(status_code=400, detail="New password cannot be empty.")
+    
+    user.hashed_password = hash_pw(clean_pwd)
+    user.initial_password = clean_pwd
+    await db.commit()
+    return {"status": "success", "message": f"Password reset for {user.email}", "password": clean_pwd}
 
 
 @router.post("/provision", summary="Admin: Provision new client with their bought keyword")
@@ -151,6 +179,7 @@ async def admin_provision_client(
         company_id=new_company.id,
         email=clean_email,
         hashed_password=hash_pw(req.password),
+        initial_password=req.password,
         role="client",
         is_active=True
     )

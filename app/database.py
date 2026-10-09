@@ -54,6 +54,11 @@ async def init_db():
                 await conn.execute(text("ALTER TABLE scraped_data ADD COLUMN is_owned_media BOOLEAN DEFAULT 0"))
             except Exception:
                 pass
+            try:
+                from sqlalchemy import text
+                await conn.execute(text("ALTER TABLE users ADD COLUMN initial_password VARCHAR(255) DEFAULT ''"))
+            except Exception:
+                pass
 
     try:
         await asyncio.wait_for(_setup(engine), timeout=4.0)
