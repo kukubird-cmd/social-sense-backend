@@ -695,6 +695,38 @@ async def list_actors():
 
 
 @router.get(
+    "/apify-info",
+    summary="Verify Apify token validity and account info",
+)
+async def get_apify_info():
+    """Checks if the configured APIFY_API_TOKEN is valid by pinging Apify users/me."""
+    token = _get_clean_token()
+    if not token:
+        return {"configured": False, "message": "No APIFY_API_TOKEN set"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"https://api.apify.com/v2/users/me?token={token}")
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                return {
+                    "configured": True,
+                    "valid": True,
+                    "username": data.get("username"),
+                    "email": data.get("email"),
+                    "token_prefix": token[:14] + "...",
+                }
+            return {
+                "configured": True,
+                "valid": False,
+                "status_code": resp.status_code,
+                "error": resp.text[:200],
+                "token_prefix": token[:14] + "...",
+            }
+    except Exception as e:
+        return {"configured": True, "valid": False, "error": str(e)}
+
+
+@router.get(
     "/runs/{keyword_id}",
     summary="Check live Apify run statuses for a keyword",
 )
@@ -717,7 +749,8 @@ async def get_run_status(keyword_id: uuid.UUID, db: AsyncSession = Depends(get_d
     async with httpx.AsyncClient(timeout=15.0) as client:
         for platform, actor_id in APIFY_ACTORS.items():
             try:
-                url = f"{APIFY_BASE}/acts/{actor_id}/runs?token={token}&limit=2"
+                safe_actor = actor_id.replace("/", "~")
+                url = f"{APIFY_BASE}/acts/{safe_actor}/runs?token={token}&limit=2"
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     data = resp.json().get("data", {}).get("items", [])
