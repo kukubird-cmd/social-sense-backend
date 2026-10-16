@@ -61,27 +61,42 @@ def check_is_owned_media(text: str, author: str, item: Dict[str, Any]) -> bool:
 
 
 async def fetch_apify_dataset_items(dataset_id: str) -> List[Dict[str, Any]]:
-    """Fetch raw scraped items from Apify's Dataset REST API."""
-    token = (settings.APIFY_API_TOKEN or "").strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
-    if not token:
-        logger.error("APIFY_API_TOKEN is not configured.")
+    """Fetch raw scraped items from Apify's Dataset REST API with automatic backup token failover."""
+    from app.services.apify_token_pool import token_pool
+    tokens = token_pool.get_candidate_tokens()
+    if not tokens:
+        logger.error("No APIFY_API_TOKEN is configured.")
         return []
 
     url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-    params = {"token": token, "limit": 1000}
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, list):
-                # Filter out empty placeholder/noResults objects or error objects
-                return [d for d in data if not d.get("noResults") and not d.get("error")]
-            return []
-    except Exception as e:
-        logger.error(f"Failed to fetch live Apify dataset {dataset_id}: {e}")
-        return []
+    for token in tokens:
+        params = {"token": token, "limit": 1000}
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params)
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        # Filter out empty placeholder/noResults objects or error objects
+                        return [d for d in data if not d.get("noResults") and not d.get("error")]
+                    return []
+
+                # Check if this token ran out of quota or hits payment limit
+                if token_pool.is_quota_or_billing_error(response.status_code, response.text):
+                    token_pool.mark_exhausted(token, f"Dataset HTTP {response.status_code}: {response.text[:150]}")
+                    continue  # Try next backup token
+
+                response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if token_pool.is_quota_or_billing_error(e.response.status_code, e.response.text):
+                token_pool.mark_exhausted(token, f"Dataset HTTP {e.response.status_code}: {e.response.text[:150]}")
+                continue
+            logger.error(f"Failed to fetch live Apify dataset {dataset_id}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to fetch live Apify dataset {dataset_id}: {e}")
+
+    return []
 
 
 def parse_apify_record(item: Dict[str, Any], keyword_id: uuid.UUID) -> ScrapedData:
@@ -303,10 +318,12 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
     # --- 7. THREADS DETECTION ---
     elif (
         "threads.net" in str(item.get("link", "")).lower()
+        or "threads.com" in str(item.get("link", "")).lower()
         or "threads.net" in str(item.get("url", "")).lower()
+        or "threads.com" in str(item.get("url", "")).lower()
         or item.get("platform") == "threads"
         or "threads" in str(item.get("source_type", "")).lower()
-        or (("reposts_count" in item or "quotes_count" in item) and ("thread" in str(item).lower() or "code" in item))
+        or (("reposts_count" in item or "quotes_count" in item or "stats" in item) and ("thread" in str(item).lower() or "code" in item))
     ):
         platform = "threads"
         post_url = item.get("link") or item.get("url") or (f"https://www.threads.net/post/{item.get('code') or item.get('id', '')}" if item.get("code") or item.get("id") else "https://www.threads.net")
@@ -321,12 +338,14 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
         else:
             author = item.get("username") or item.get("ownerUsername") or "Threads User"
 
+        stats = item.get("stats") or {}
         is_thread_reply = bool(item.get("is_reply") or item.get("isReply") or item.get("source_type") == "reply")
         metrics = {
-            "likes": item.get("likes_count", 0) or item.get("likesCount", 0) or item.get("likes", 0),
-            "replies": item.get("replies_count", 0) or item.get("repliesCount", 0) or item.get("replyCount", 0),
-            "reposts": item.get("reposts_count", 0) or item.get("repostsCount", 0) or 0,
-            "quotes": item.get("quotes_count", 0) or item.get("quotesCount", 0) or 0,
+            "likes": item.get("likes_count") or stats.get("like_count") or item.get("likesCount") or item.get("likes") or 0,
+            "replies": item.get("replies_count") or stats.get("reply_count") or item.get("repliesCount") or item.get("replyCount") or 0,
+            "reposts": item.get("reposts_count") or stats.get("repost_count") or item.get("repostsCount") or 0,
+            "quotes": item.get("quotes_count") or stats.get("quote_count") or item.get("quotesCount") or 0,
+            "shares": stats.get("share_count") or item.get("shares_count") or item.get("shares") or 0,
             "post_type": "reply" if is_thread_reply else "post",
             "author": f"@{author}" if not author.startswith("@") else author
         }

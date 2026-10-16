@@ -51,7 +51,8 @@ cp .env.example .env
 Ensure your PostgreSQL database connection string is configured in `.env`:
 ```env
 DATABASE_URL="postgresql+asyncpg://postgres:your_password@localhost:5432/socialsense_db"
-APIFY_API_TOKEN="apify_api_your_token_here"
+APIFY_API_TOKEN="apify_api_primary_token_here"
+APIFY_BACKUP_API_TOKEN="apify_api_backup_token_here" # Optional backup key for auto quota failover
 ```
 
 ### Step 4: Run Database Seed (Optional for Demo Testing)

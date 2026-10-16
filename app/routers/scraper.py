@@ -27,6 +27,7 @@ from app.services.tunnel_manager import (
     get_current_url,
 )
 from app.routers.webhooks import process_apify_dataset_task
+from app.services.apify_token_pool import token_pool
 
 logger = logging.getLogger("scraper")
 router = APIRouter(prefix="/api/scraper", tags=["Live Scraper"])
@@ -47,7 +48,10 @@ APIFY_BASE = "https://api.apify.com/v2"
 
 
 def _get_clean_token() -> str:
-    """Returns the Apify API token with all whitespace, newlines, and quotes strictly removed."""
+    """Returns the current active Apify API token from the token pool."""
+    active = token_pool.get_active_token()
+    if active:
+        return active
     return (settings.APIFY_API_TOKEN or "").strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
 
 
@@ -202,44 +206,63 @@ async def _trigger_actor(
 ) -> dict:
     """
     Launches a single Apify Actor run for the given platform + keyword.
-    Sends actor input directly as top-level JSON body.
-    Includes retry loop to prevent transient DNS or connection drops.
+    Supports automatic quota failover: if the primary token hits quota/payment limits (HTTP 402, 429, etc.),
+    it seamlessly fails over and retries immediately with backup Apify token(s).
     """
     actor_id = APIFY_ACTORS[platform].replace("/", "~")
-    token = _get_clean_token()
+    candidate_tokens = token_pool.get_candidate_tokens()
+    if not candidate_tokens:
+        tok = _get_clean_token()
+        if tok:
+            candidate_tokens = [tok]
+
+    if not candidate_tokens:
+        raise RuntimeError("No Apify API tokens configured on server.")
+
     actor_input = _build_actor_input(platform, keyword_string, limit=limit)
-
-    url = f"{APIFY_BASE}/acts/{actor_id}/runs?token={token}"
-    if webhook_base_url and ("http://" in webhook_base_url or "https://" in webhook_base_url) and "localhost" not in webhook_base_url:
-        import json, base64
-        webhook_url = f"{webhook_base_url.rstrip('/')}/api/webhooks/apify?keyword_id={keyword_id}"
-        webhook_cfg = [
-            {
-                "eventTypes": ["ACTOR.RUN.SUCCEEDED"],
-                "requestUrl": webhook_url,
-                "payloadTemplate": (
-                    '{"eventData":{"defaultDatasetId":"{{defaultDatasetId}}",'
-                    '"actorId":"{{actorId}}","actorRunId":"{{actorRunId}}"}}'
-                ),
-            }
-        ]
-        param = base64.b64encode(json.dumps(webhook_cfg).encode()).decode()
-        url += f"&webhooks={param}"
-
     last_err = None
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for attempt in range(3):
-            try:
-                resp = await client.post(url, json=actor_input)
-                if resp.status_code in (200, 201):
-                    return resp.json().get("data", {})
-                last_err = f"Apify returned {resp.status_code} for {platform}: {resp.text[:300]}"
-            except Exception as e:
-                last_err = str(e)
-            if attempt < 2:
-                await asyncio.sleep(1.5)
 
-    raise RuntimeError(last_err or f"Failed to trigger {platform}")
+    for token_idx, token in enumerate(candidate_tokens):
+        if not token:
+            continue
+
+        url = f"{APIFY_BASE}/acts/{actor_id}/runs?token={token}"
+        if webhook_base_url and ("http://" in webhook_base_url or "https://" in webhook_base_url) and "localhost" not in webhook_base_url:
+            import json, base64
+            webhook_url = f"{webhook_base_url.rstrip('/')}/api/webhooks/apify?keyword_id={keyword_id}"
+            webhook_cfg = [
+                {
+                    "eventTypes": ["ACTOR.RUN.SUCCEEDED"],
+                    "requestUrl": webhook_url,
+                    "payloadTemplate": (
+                        '{"eventData":{"defaultDatasetId":"{{defaultDatasetId}}",'
+                        '"actorId":"{{actorId}}","actorRunId":"{{actorRunId}}"}}'
+                    ),
+                }
+            ]
+            param = base64.b64encode(json.dumps(webhook_cfg).encode()).decode()
+            url += f"&webhooks={param}"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for attempt in range(2):
+                try:
+                    resp = await client.post(url, json=actor_input)
+                    if resp.status_code in (200, 201):
+                        return resp.json().get("data", {})
+
+                    # Check for quota, payment, or rate-limit exhaustion
+                    if token_pool.is_quota_or_billing_error(resp.status_code, resp.text):
+                        token_pool.mark_exhausted(token, f"Actor launch HTTP {resp.status_code}: {resp.text[:150]}")
+                        last_err = f"Apify quota reached on token #{token_idx+1}: {resp.text[:200]}"
+                        break  # Break inner attempt to try next candidate backup token immediately
+
+                    last_err = f"Apify returned {resp.status_code} for {platform}: {resp.text[:300]}"
+                except Exception as e:
+                    last_err = str(e)
+                if attempt < 1:
+                    await asyncio.sleep(1.0)
+
+    raise RuntimeError(last_err or f"Failed to trigger {platform} across all configured Apify tokens")
 
 
 async def _poll_and_ingest_run(run_id: str, keyword_id: uuid.UUID, platform: str):
@@ -721,6 +744,7 @@ async def get_apify_info():
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"https://api.apify.com/v2/users/me?token={token}")
+            pool_status = token_pool.get_pool_status()
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 return {
@@ -729,6 +753,7 @@ async def get_apify_info():
                     "username": data.get("username"),
                     "email": data.get("email"),
                     "token_prefix": token[:14] + "...",
+                    "token_pool": pool_status
                 }
             return {
                 "configured": True,
@@ -736,9 +761,29 @@ async def get_apify_info():
                 "status_code": resp.status_code,
                 "error": resp.text[:200],
                 "token_prefix": token[:14] + "...",
+                "token_pool": pool_status
             }
     except Exception as e:
-        return {"configured": True, "valid": False, "error": str(e)}
+        return {"configured": True, "valid": False, "error": str(e), "token_pool": token_pool.get_pool_status()}
+
+
+@router.get(
+    "/apify-pool",
+    summary="Get Apify Token Pool status and backup keys failover status",
+)
+async def get_apify_pool_status():
+    """Returns the status of all configured Apify tokens and failovers."""
+    return token_pool.get_pool_status()
+
+
+@router.post(
+    "/apify-pool/reset",
+    summary="Reset exhausted tokens pool status",
+)
+async def reset_apify_pool():
+    """Resets all exhausted flags across configured tokens."""
+    token_pool.reset_exhausted()
+    return {"status": "reset", "pool": token_pool.get_pool_status()}
 
 
 @router.get(

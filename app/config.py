@@ -18,10 +18,12 @@ class Settings(BaseSettings):
 
     # External APIs
     APIFY_API_TOKEN: Optional[str] = os.getenv("APIFY_API_TOKEN", None)
+    APIFY_BACKUP_API_TOKEN: Optional[str] = os.getenv("APIFY_BACKUP_API_TOKEN", None)
+    APIFY_API_TOKENS: Optional[str] = os.getenv("APIFY_API_TOKENS", None)
     ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY", None)
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY", None)
 
-    @field_validator("APIFY_API_TOKEN", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", mode="before")
+    @field_validator("APIFY_API_TOKEN", "APIFY_BACKUP_API_TOKEN", "APIFY_API_TOKENS", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", mode="before")
     @classmethod
     def clean_api_keys(cls, v):
         if isinstance(v, str):
@@ -39,6 +41,10 @@ class Settings(BaseSettings):
         # Defensive double-sanitization
         if self.APIFY_API_TOKEN:
             self.APIFY_API_TOKEN = str(self.APIFY_API_TOKEN).strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
+        if self.APIFY_BACKUP_API_TOKEN:
+            self.APIFY_BACKUP_API_TOKEN = str(self.APIFY_BACKUP_API_TOKEN).strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
+        if self.APIFY_API_TOKENS:
+            self.APIFY_API_TOKENS = str(self.APIFY_API_TOKENS).strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
         if self.GEMINI_API_KEY:
             self.GEMINI_API_KEY = str(self.GEMINI_API_KEY).strip().replace("\r", "").replace("\n", "").replace('"', '').replace("'", "")
     
