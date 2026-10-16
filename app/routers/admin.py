@@ -43,6 +43,15 @@ class AdminUpdateStatusRequest(BaseModel):
     billing_status: str # "active", "suspended", "canceled"
 
 
+class AdminUpdateQuotaRequest(BaseModel):
+    max_keywords: int
+
+
+class AdminAddKeywordRequest(BaseModel):
+    keyword_string: str
+    topic_context: Optional[str] = ""
+
+
 @router.post("/verify", summary="Verify Admin Master Password")
 async def verify_admin_login(is_admin: bool = Depends(verify_admin)):
     return {"status": "authenticated", "message": "Admin authorization verified."}
@@ -163,11 +172,16 @@ async def admin_provision_client(
             detail=f"User with email '{clean_email}' already exists."
         )
 
-    # 2. Create isolated Company with strict keyword plan
+    # 2. Parse initial keyword(s) and set quota
+    kw_list = [k.strip() for k in clean_kw.replace(";", ",").split(",") if k.strip()]
+    if not kw_list:
+        kw_list = [clean_kw]
+    configured_quota = max(1, req.max_keywords or 1, len(kw_list))
+
     new_company = Company(
         id=uuid.uuid4(),
         name=clean_company,
-        max_keywords=max(1, req.max_keywords or 1),
+        max_keywords=configured_quota,
         billing_status="active"
     )
     db.add(new_company)
@@ -185,26 +199,40 @@ async def admin_provision_client(
     )
     db.add(new_user)
 
-    # 4. Create the strictly authorized bought keyword
-    created_kw = Keyword(
-        id=uuid.uuid4(),
-        company_id=new_company.id,
-        keyword_string=clean_kw,
-        topic_context=(req.topic_context or "").strip(),
-        is_active=True
-    )
-    db.add(created_kw)
+    # 4. Create the strictly authorized bought keywords
+    created_keywords = []
+    for single_kw in kw_list:
+        created_kw = Keyword(
+            id=uuid.uuid4(),
+            company_id=new_company.id,
+            keyword_string=single_kw,
+            topic_context=(req.topic_context or "").strip(),
+            platform_flags={
+                "tiktok": True,
+                "instagram": True,
+                "twitter": True,
+                "reddit": True,
+                "youtube": True,
+                "threads": True
+            },
+            is_active=True
+        )
+        db.add(created_kw)
+        created_keywords.append(created_kw)
 
     await db.commit()
     await db.refresh(new_company)
     await db.refresh(new_user)
-    await db.refresh(created_kw)
+    for kw_obj in created_keywords:
+        await db.refresh(kw_obj)
 
-    logger.info(f"🔑 Admin provisioned client: '{clean_company}' ({clean_email}) with keyword: '{clean_kw}'")
+    kw_summary_str = ", ".join(f"'{k.keyword_string}'" for k in created_keywords)
+    logger.info(f"🔑 Admin provisioned client: '{clean_company}' ({clean_email}) with keyword(s): {kw_summary_str} [Quota: {new_company.max_keywords}]")
 
+    primary_kw = created_keywords[0] if created_keywords else None
     return {
         "status": "success",
-        "message": f"Client '{clean_company}' successfully registered with keyword '{clean_kw}'!",
+        "message": f"Client '{clean_company}' successfully registered with {len(created_keywords)} keyword(s) [Quota: {new_company.max_keywords}]!",
         "company": {
             "id": str(new_company.id),
             "name": new_company.name,
@@ -216,10 +244,18 @@ async def admin_provision_client(
             "password": req.password
         },
         "keyword": {
-            "id": str(created_kw.id),
-            "keyword_string": created_kw.keyword_string,
-            "topic_context": created_kw.topic_context
-        }
+            "id": str(primary_kw.id) if primary_kw else "",
+            "keyword_string": primary_kw.keyword_string if primary_kw else clean_kw,
+            "topic_context": primary_kw.topic_context if primary_kw else ""
+        },
+        "assigned_keywords": [
+            {
+                "id": str(k.id),
+                "keyword_string": k.keyword_string,
+                "topic_context": k.topic_context
+            }
+            for k in created_keywords
+        ]
     }
 
 
@@ -264,3 +300,102 @@ async def delete_client_workspace(
     await db.commit()
 
     return {"status": "success", "message": f"Client workspace '{comp.name}' deleted successfully."}
+
+
+@router.patch("/clients/{company_id}/quota", summary="Admin: Update client keyword quota limit")
+async def update_client_quota(
+    company_id: uuid.UUID,
+    req: AdminUpdateQuotaRequest,
+    is_admin: bool = Depends(verify_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(Company).where(Company.id == company_id)
+    res = await db.execute(stmt)
+    comp = res.scalar_one_or_none()
+    if not comp:
+        raise HTTPException(status_code=404, detail="Company not found.")
+
+    if req.max_keywords < 1:
+        raise HTTPException(status_code=400, detail="Max keywords must be at least 1.")
+
+    comp.max_keywords = req.max_keywords
+    await db.commit()
+    await db.refresh(comp)
+
+    return {
+        "status": "success",
+        "company_id": str(comp.id),
+        "name": comp.name,
+        "max_keywords": comp.max_keywords
+    }
+
+
+@router.post("/clients/{company_id}/keywords", summary="Admin: Add authorized keyword directly to client workspace")
+async def admin_add_client_keyword(
+    company_id: uuid.UUID,
+    req: AdminAddKeywordRequest,
+    is_admin: bool = Depends(verify_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(Company).where(Company.id == company_id)
+    res = await db.execute(stmt)
+    comp = res.scalar_one_or_none()
+    if not comp:
+        raise HTTPException(status_code=404, detail="Company not found.")
+
+    clean_kw = req.keyword_string.strip()
+    if not clean_kw:
+        raise HTTPException(status_code=400, detail="Keyword cannot be empty.")
+
+    # Check if keyword already exists for this client
+    existing = await db.execute(
+        select(Keyword).where(
+            Keyword.company_id == company_id,
+            func.lower(Keyword.keyword_string) == clean_kw.lower()
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Keyword '{clean_kw}' already exists for this client.")
+
+    # Count active keywords
+    active_res = await db.execute(
+        select(func.count(Keyword.id)).where(
+            Keyword.company_id == company_id,
+            Keyword.is_active.is_(True)
+        )
+    )
+    active_count = active_res.scalar_one()
+
+    # Automatically expand max_keywords if needed so admin can always add
+    if active_count >= comp.max_keywords:
+        comp.max_keywords = active_count + 1
+
+    new_kw = Keyword(
+        id=uuid.uuid4(),
+        company_id=comp.id,
+        keyword_string=clean_kw,
+        topic_context=(req.topic_context or "").strip(),
+        platform_flags={
+            "tiktok": True,
+            "instagram": True,
+            "twitter": True,
+            "reddit": True,
+            "youtube": True,
+            "threads": True
+        },
+        is_active=True
+    )
+    db.add(new_kw)
+    await db.commit()
+    await db.refresh(new_kw)
+    await db.refresh(comp)
+
+    return {
+        "status": "success",
+        "keyword": {
+            "id": str(new_kw.id),
+            "keyword_string": new_kw.keyword_string,
+            "topic_context": new_kw.topic_context
+        },
+        "max_keywords": comp.max_keywords
+    }
