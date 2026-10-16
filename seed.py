@@ -26,7 +26,7 @@ async def seed_demo_data():
             id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
             company_id=demo_company.id,
             keyword_string="#ApexMotorsMY",
-            platform_flags={"tiktok": True, "instagram": True, "twitter": True, "reddit": True, "youtube": True},
+            platform_flags={"tiktok": True, "instagram": True, "twitter": True, "reddit": True, "youtube": True, "threads": True},
             is_active=True
         )
 
@@ -34,7 +34,7 @@ async def seed_demo_data():
             id=uuid.UUID("33333333-3333-3333-3333-333333333333"),
             company_id=demo_company.id,
             keyword_string="Apex Horizon EV",
-            platform_flags={"tiktok": True, "instagram": True, "twitter": True, "reddit": False, "youtube": True},
+            platform_flags={"tiktok": True, "instagram": True, "twitter": True, "reddit": False, "youtube": True, "threads": True},
             is_active=True
         )
 

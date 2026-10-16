@@ -86,7 +86,8 @@ async def create_keyword_for_company(
             "instagram": True,
             "twitter": True,
             "reddit": True,
-            "youtube": True
+            "youtube": True,
+            "threads": True
         },
         is_active=True
     )

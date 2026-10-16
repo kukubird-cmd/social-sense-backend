@@ -34,6 +34,7 @@ class PlatformFlags(BaseModel):
     twitter: bool = True
     reddit: bool = True
     youtube: bool = True
+    threads: bool = True
 
 
 class KeywordCreate(BaseModel):

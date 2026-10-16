@@ -40,6 +40,7 @@ APIFY_ACTORS = {
     "twitter":   "apidojo/tweet-scraper",
     "reddit":    "trudax/reddit-scraper-lite",
     "youtube":   "blackfalcondata/youtube-comment-scraper",
+    "threads":   os.getenv("APIFY_ACTOR_THREADS", "omkar-cloud/threads-search-scraper"),
 }
 
 APIFY_BASE = "https://api.apify.com/v2"
@@ -62,7 +63,7 @@ class TunnelStartRequest(BaseModel):
 class QuickScrapeRequest(BaseModel):
     company_id: str
     keyword_string: str
-    platforms: Optional[str] = "tiktok,instagram,twitter,reddit,youtube"
+    platforms: Optional[str] = "tiktok,instagram,twitter,reddit,youtube,threads"
     limit: Optional[int] = 100
 
 
@@ -175,6 +176,20 @@ def _build_actor_input(platform: str, keyword: str, limit: int = 100) -> dict:
             "maxComments": limit,
             "sort": "top",
         }
+    elif platform == "threads":
+        if is_hashtag:
+            return {
+                "hashtags": [clean_keyword],
+                "searchQueries": [clean_keyword],
+                "maxItems": limit,
+                "resultsLimit": limit,
+            }
+        else:
+            return {
+                "searchQueries": [clean_keyword],
+                "maxItems": limit,
+                "resultsLimit": limit,
+            }
     return {}
 
 
@@ -319,7 +334,7 @@ async def trigger_scrape(
     background_tasks: BackgroundTasks,
     company_id: Optional[str] = None,
     webhook_base_url: Optional[str] = None,
-    platforms: str = "tiktok,instagram,twitter,reddit,youtube",
+    platforms: str = "tiktok,instagram,twitter,reddit,youtube,threads",
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
@@ -478,7 +493,7 @@ async def quick_scrape(
     _check_and_lock_scraper(keyword.id, keyword.keyword_string)
 
     active_webhook_url = (webhook_base_url or get_current_url() or "").strip()
-    requested_platforms = [p.strip().lower() for p in (req.platforms or "tiktok,instagram,twitter,reddit,youtube").split(",") if p.strip()]
+    requested_platforms = [p.strip().lower() for p in (req.platforms or "tiktok,instagram,twitter,reddit,youtube,threads").split(",") if p.strip()]
     scrape_limit = req.limit or 100
     
     if not _get_clean_token():

@@ -51,6 +51,8 @@ async def chat_with_database(req: ChatRequest, db: AsyncSession = Depends(get_db
         target_platform = "reddit"
     elif any(term in msg_lower for term in ["twitter", "on x", "in x", "tweets", "tweet", "x.com"]):
         target_platform = "twitter"
+    elif any(term in msg_lower for term in ["threads", "on threads", "in threads", "thread"]):
+        target_platform = "threads"
 
     # 2. Fetch scraped posts from database (strictly isolated by company)
     stmt = (

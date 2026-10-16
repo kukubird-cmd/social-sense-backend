@@ -71,7 +71,7 @@ class Keyword(Base):
     company_id = Column(GUID, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
     keyword_string = Column(String(255), nullable=False)
     
-    # Platform flags: booleans for {"tiktok": true, "instagram": true, "twitter": true, "reddit": true, "youtube": true}
+    # Platform flags: booleans for {"tiktok": true, "instagram": true, "twitter": true, "reddit": true, "youtube": true, "threads": true}
     platform_flags = Column(
         JSON, 
         nullable=False, 
@@ -80,7 +80,8 @@ class Keyword(Base):
             "instagram": True,
             "twitter": True,
             "reddit": True,
-            "youtube": True
+            "youtube": True,
+            "threads": True
         }
     )
     topic_context = Column(Text, nullable=True, default="")
@@ -108,7 +109,7 @@ class ScrapedData(Base):
 
     id = Column(GUID, primary_key=True, default=uuid.uuid4, index=True)
     keyword_id = Column(GUID, ForeignKey("keywords.id", ondelete="CASCADE"), nullable=False, index=True)
-    platform = Column(String(50), nullable=False, index=True) # tiktok, instagram, twitter, reddit, youtube
+    platform = Column(String(50), nullable=False, index=True) # tiktok, instagram, twitter, reddit, youtube, threads
     post_url = Column(Text, nullable=False)
     comment_text = Column(Text, nullable=False)
     engagement_metrics = Column(JSON, nullable=False, default=dict) # {"likes": 0, "shares": 0, "comments": 0, "views": 0}

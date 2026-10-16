@@ -92,6 +92,7 @@ def parse_apify_record(item: Dict[str, Any], keyword_id: uuid.UUID) -> ScrapedDa
     3. X / Twitter (Tweets & Replies)
     4. Reddit (Submissions & Comments)
     5. YouTube (Videos & Viewer Comments)
+    6. Threads (Posts & Replies)
     """
     records = parse_apify_item_to_records(item, keyword_id)
     return records[0] if records else ScrapedData(
@@ -298,6 +299,69 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
             "post_type": "comment" if is_reddit_comment else "post",
             "author": f"u/{author}" if not author.startswith("u/") else author
         }
+
+    # --- 7. THREADS DETECTION ---
+    elif (
+        "threads.net" in str(item.get("link", "")).lower()
+        or "threads.net" in str(item.get("url", "")).lower()
+        or item.get("platform") == "threads"
+        or "threads" in str(item.get("source_type", "")).lower()
+        or (("reposts_count" in item or "quotes_count" in item) and ("thread" in str(item).lower() or "code" in item))
+    ):
+        platform = "threads"
+        post_url = item.get("link") or item.get("url") or (f"https://www.threads.net/post/{item.get('code') or item.get('id', '')}" if item.get("code") or item.get("id") else "https://www.threads.net")
+        comment_text = item.get("text") or item.get("caption") or item.get("content") or ""
+
+        # Extract author
+        author_data = item.get("author") or item.get("user") or {}
+        if isinstance(author_data, dict):
+            author = author_data.get("username") or author_data.get("full_name") or "Threads User"
+        elif isinstance(author_data, str) and author_data.strip():
+            author = author_data.strip()
+        else:
+            author = item.get("username") or item.get("ownerUsername") or "Threads User"
+
+        is_thread_reply = bool(item.get("is_reply") or item.get("isReply") or item.get("source_type") == "reply")
+        metrics = {
+            "likes": item.get("likes_count", 0) or item.get("likesCount", 0) or item.get("likes", 0),
+            "replies": item.get("replies_count", 0) or item.get("repliesCount", 0) or item.get("replyCount", 0),
+            "reposts": item.get("reposts_count", 0) or item.get("repostsCount", 0) or 0,
+            "quotes": item.get("quotes_count", 0) or item.get("quotesCount", 0) or 0,
+            "post_type": "reply" if is_thread_reply else "post",
+            "author": f"@{author}" if not author.startswith("@") else author
+        }
+
+        # Check for nested replies in threads post
+        nested_replies = item.get("replies") or item.get("comments") or []
+        if isinstance(nested_replies, list):
+            for rep in nested_replies:
+                if isinstance(rep, dict):
+                    r_text = rep.get("text") or rep.get("content") or rep.get("caption") or ""
+                    if not r_text.strip():
+                        continue
+                    r_auth = rep.get("author") or rep.get("user") or {}
+                    if isinstance(r_auth, dict):
+                        r_author = r_auth.get("username") or r_auth.get("full_name") or "Threads User"
+                    elif isinstance(r_auth, str) and r_auth.strip():
+                        r_author = r_auth.strip()
+                    else:
+                        r_author = "Threads User"
+                    r_author_str = f"@{r_author}" if not r_author.startswith("@") else r_author
+                    results.append(ScrapedData(
+                        keyword_id=keyword_id,
+                        platform="threads",
+                        post_url=rep.get("link") or rep.get("url") or post_url,
+                        comment_text=r_text.strip(),
+                        engagement_metrics={
+                            "likes": rep.get("likes_count", 0) or rep.get("likes", 0),
+                            "post_type": "reply",
+                            "author": r_author_str,
+                            "is_owned_media": False
+                        },
+                        sentiment_score=analyze_sentiment_claude(r_text),
+                        is_owned_media=False,
+                        timestamp=timestamp
+                    ))
 
     # Fallback
     else:

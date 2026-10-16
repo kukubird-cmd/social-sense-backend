@@ -53,7 +53,8 @@ def linkify_citations(reply: str, records: List[Dict[str, Any]]) -> str:
         "tiktok": "TikTok",
         "instagram": "Instagram",
         "twitter": "X/Twitter",
-        "x": "X/Twitter"
+        "x": "X/Twitter",
+        "threads": "Threads"
     }
 
     # Group records by platform
@@ -66,7 +67,7 @@ def linkify_citations(reply: str, records: List[Dict[str, Any]]) -> str:
 
     # Pattern: (YouTube), (Reddit), etc. NOT preceded by ']'
     citation_pattern = re.compile(
-        r'(?<!\])\s*\((YouTube|Reddit|TikTok|Instagram|Twitter|X|X\/Twitter)\)',
+        r'(?<!\])\s*\((YouTube|Reddit|TikTok|Instagram|Twitter|X|X\/Twitter|Threads)\)',
         re.IGNORECASE
     )
 

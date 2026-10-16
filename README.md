@@ -82,7 +82,8 @@ API Documentation will be live at:
         "instagram": true,
         "twitter": true,
         "reddit": true,
-        "youtube": true
+        "youtube": true,
+        "threads": true
       }
     }
     ```
