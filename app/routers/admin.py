@@ -399,3 +399,26 @@ async def admin_add_client_keyword(
         },
         "max_keywords": comp.max_keywords
     }
+
+
+@router.delete("/clients/{company_id}/keywords/{keyword_id}", summary="Admin: Delete authorized keyword from client")
+async def admin_delete_client_keyword(
+    company_id: uuid.UUID,
+    keyword_id: uuid.UUID,
+    is_admin: bool = Depends(verify_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(Keyword).where(
+        Keyword.id == keyword_id,
+        Keyword.company_id == company_id
+    )
+    res = await db.execute(stmt)
+    kw = res.scalar_one_or_none()
+    if not kw:
+        raise HTTPException(status_code=404, detail="Keyword not found for this client.")
+
+    kw_name = kw.keyword_string
+    await db.delete(kw)
+    await db.commit()
+    return {"status": "success", "message": f"Keyword '{kw_name}' removed."}
+
