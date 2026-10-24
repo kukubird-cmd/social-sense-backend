@@ -150,13 +150,14 @@ async def get_company_quota(
 async def list_company_scraped_data(
     company_id: uuid.UUID,
     keyword_id: uuid.UUID = None,
-    limit: int = 1000,
+    limit: int = 50000,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Returns real social media data scraped by Apify for this company's keywords.
     When keyword_id is provided, strictly isolates records to that keyword only.
     Includes platform, original post URL, comment/text, sentiment, metrics, and timestamp.
+    No hard row cap — returns ALL scraped records.
     """
     stmt = (
         select(ScrapedData, Keyword.keyword_string)
