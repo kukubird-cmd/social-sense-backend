@@ -53,13 +53,29 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
                 except Exception as e:
                     logger.error(f"Error parsing item in dataset {dataset_id}: {e}")
 
-            # 4. Save records to PostgreSQL
-            db.add_all(scraped_records)
-            await db.commit()
+            logger.info(f"Parsed {len(scraped_records)} records from Apify dataset {dataset_id}")
 
-            # Refresh records for ID generation
-            for r in scraped_records:
-                await db.refresh(r)
+            # 4. Deduplication — skip any post_url already saved for this keyword
+            if scraped_records:
+                from sqlalchemy import select as sa_select
+                existing_urls_result = await db.execute(
+                    sa_select(ScrapedData.post_url).where(ScrapedData.keyword_id == keyword_id)
+                )
+                existing_urls = {row[0] for row in existing_urls_result.fetchall()}
+                new_records = [r for r in scraped_records if r.post_url not in existing_urls]
+                duplicate_count = len(scraped_records) - len(new_records)
+                if duplicate_count:
+                    logger.info(f"Skipped {duplicate_count} duplicate posts already in DB")
+                scraped_records = new_records
+
+            # 5. Save records to PostgreSQL
+            if scraped_records:
+                db.add_all(scraped_records)
+                await db.commit()
+
+                # Refresh records for ID generation
+                for r in scraped_records:
+                    await db.refresh(r)
 
             logger.info(f"Saved {len(scraped_records)} new records to database for company {company_id_str}")
 

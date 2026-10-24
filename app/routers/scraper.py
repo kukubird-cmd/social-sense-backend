@@ -269,8 +269,8 @@ async def _poll_and_ingest_run(run_id: str, keyword_id: uuid.UUID, platform: str
     and broadcasts to WebSockets. Does NOT require any public ngrok tunnel!
     """
     token = _get_clean_token()
-    max_wait_seconds = 180
-    interval = 6
+    max_wait_seconds = 600  # Up to 10 minutes for large runs (1000 items)
+    interval = 8
     elapsed = 0
 
     logger.info(f"⏳ Monitoring [{platform}] run {run_id} in background (auto-ingest poller active)...")
@@ -652,7 +652,7 @@ async def _launch_all_platforms(
     keyword_id: uuid.UUID,
     webhook_base_url: str,
     requested_platforms: list,
-    limit: int = 100,
+    limit: int = DEFAULT_SCRAPE_LIMIT,
 ):
     """Background coroutine: launches Apify actors for each platform and starts auto-pollers."""
     current_task = asyncio.current_task()
