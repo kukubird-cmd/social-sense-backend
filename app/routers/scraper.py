@@ -44,7 +44,7 @@ APIFY_ACTORS = {
 }
 
 APIFY_BASE = "https://api.apify.com/v2"
-DEFAULT_SCRAPE_LIMIT = 2500
+DEFAULT_SCRAPE_LIMIT = 1000  # Fixed at 1000 per platform: 4 platforms × 1000 = 4000 per keyword
 
 
 def _get_clean_token() -> str:
@@ -119,15 +119,24 @@ async def set_tunnel_url(req: TunnelUpdateRequest):
 
 
 def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_LIMIT) -> dict:
-    """Build the platform-specific input schema for each Apify actor to maximize quota and depth."""
+    """
+    Build platform-specific Apify actor input.
+    Fixed at 1000 posts per platform:
+      TikTok:    1000 videos (100 per page × 10 pages)
+      Instagram: 1000 posts + 100 comments each
+      X/Twitter: 1000 tweets + replies
+      YouTube:   1000 comments
+    Total: 4 platforms × 1000 = 4,000 per keyword.
+    """
     clean_keyword = keyword.replace("#", "").strip()
     is_hashtag = keyword.strip().startswith("#") and " " not in clean_keyword
 
     if platform == "tiktok":
+        # resultsPerPage capped at 100 by TikTok API — maxItems drives pagination up to `limit`
         if is_hashtag:
             return {
                 "hashtags": [clean_keyword],
-                "resultsPerPage": min(limit, 100),
+                "resultsPerPage": 100,
                 "maxItems": limit,
                 "shouldDownloadVideos": False,
                 "shouldDownloadCovers": False,
@@ -135,7 +144,7 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
         else:
             return {
                 "searchQueries": [clean_keyword],
-                "resultsPerPage": min(limit, 100),
+                "resultsPerPage": 100,
                 "maxItems": limit,
                 "shouldDownloadVideos": False,
                 "shouldDownloadCovers": False,
@@ -151,7 +160,7 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
             "searchLimit": limit,
             "resultsType": "posts",
             "resultsLimit": limit,
-            "maxComments": 250,
+            "maxComments": 100,
             "directUrls": direct_urls,
         }
     elif platform == "twitter":
@@ -191,7 +200,7 @@ async def _trigger_actor(
     keyword_string: str,
     keyword_id: uuid.UUID,
     webhook_base_url: Optional[str] = None,
-    limit: int = 100,
+    limit: int = DEFAULT_SCRAPE_LIMIT,
 ) -> dict:
     """
     Launches a single Apify Actor run for the given platform + keyword.
