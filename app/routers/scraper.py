@@ -166,11 +166,10 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
     elif platform == "twitter":
         return {
             "searchTerms": [keyword],
-            "maxTweets": limit,
             "maxItems": limit,
+            "sort": "Latest",
             "addUserInfo": True,
             "scrapeTweetReplies": True,
-            "sort": "Latest",
         }
     elif platform == "youtube":
         return {
