@@ -85,7 +85,6 @@ async def create_keyword_for_company(
             "tiktok": True,
             "instagram": True,
             "twitter": True,
-            "reddit": True,
             "youtube": True,
             "threads": True
         },

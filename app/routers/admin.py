@@ -211,7 +211,6 @@ async def admin_provision_client(
                 "tiktok": True,
                 "instagram": True,
                 "twitter": True,
-                "reddit": True,
                 "youtube": True,
                 "threads": True
             },
@@ -379,7 +378,6 @@ async def admin_add_client_keyword(
             "tiktok": True,
             "instagram": True,
             "twitter": True,
-            "reddit": True,
             "youtube": True,
             "threads": True
         },

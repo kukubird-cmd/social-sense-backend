@@ -47,8 +47,6 @@ async def chat_with_database(req: ChatRequest, db: AsyncSession = Depends(get_db
         target_platform = "youtube"
     elif any(term in msg_lower for term in ["tiktok", " on tt", " in tt", " tt ", "(tt)", "tt:"]):
         target_platform = "tiktok"
-    elif "reddit" in msg_lower:
-        target_platform = "reddit"
     elif any(term in msg_lower for term in ["twitter", "on x", "in x", "tweets", "tweet", "x.com"]):
         target_platform = "twitter"
     elif any(term in msg_lower for term in ["threads", "on threads", "in threads", "thread"]):
@@ -59,7 +57,7 @@ async def chat_with_database(req: ChatRequest, db: AsyncSession = Depends(get_db
         select(ScrapedData, Keyword.keyword_string, Keyword.topic_context)
         .join(Keyword, ScrapedData.keyword_id == Keyword.id)
         .order_by(ScrapedData.timestamp.desc())
-        .limit(1000)
+        .limit(5000)
     )
 
     if req.company_id:

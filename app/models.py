@@ -71,7 +71,7 @@ class Keyword(Base):
     company_id = Column(GUID, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
     keyword_string = Column(String(255), nullable=False)
     
-    # Platform flags: booleans for {"tiktok": true, "instagram": true, "twitter": true, "reddit": true, "youtube": true, "threads": true}
+    # Platform flags: booleans for {"tiktok": true, "instagram": true, "twitter": true, "youtube": true, "threads": true}
     platform_flags = Column(
         JSON, 
         nullable=False, 
@@ -79,7 +79,6 @@ class Keyword(Base):
             "tiktok": True,
             "instagram": True,
             "twitter": True,
-            "reddit": True,
             "youtube": True,
             "threads": True
         }

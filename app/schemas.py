@@ -32,7 +32,6 @@ class PlatformFlags(BaseModel):
     tiktok: bool = True
     instagram: bool = True
     twitter: bool = True
-    reddit: bool = True
     youtube: bool = True
     threads: bool = True
 

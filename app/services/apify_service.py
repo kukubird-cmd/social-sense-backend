@@ -71,7 +71,7 @@ async def fetch_apify_dataset_items(dataset_id: str) -> List[Dict[str, Any]]:
     url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
 
     for token in tokens:
-        params = {"token": token, "limit": 1000}
+        params = {"token": token, "limit": 50000}
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url, params=params)
@@ -299,21 +299,9 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
             "author": f"@{author}" if not author.startswith("@") else author
         }
 
-    # --- 6. REDDIT DETECTION ---
+    # --- 6. REDDIT (IGNORED / DEPRECATED) ---
     elif "subreddit" in item or "reddit.com" in item.get("url", ""):
-        platform = "reddit"
-        post_url = item.get("url") or f"https://reddit.com{item.get('permalink', '')}"
-        author = item.get("author") or item.get("username") or "u/Redditor"
-        title = item.get("title", "")
-        body = item.get("body", "") or item.get("selftext", "")
-        comment_text = f"{title}\n{body}".strip() if title else body.strip()
-        is_reddit_comment = item.get("dataType") == "comment" or bool(item.get("parentId"))
-        metrics = {
-            "upvotes": item.get("score", 0) or item.get("upvotes", 0),
-            "comments": item.get("num_comments", 0) or item.get("numberOfComments", 0),
-            "post_type": "comment" if is_reddit_comment else "post",
-            "author": f"u/{author}" if not author.startswith("u/") else author
-        }
+        return []
 
     # --- 7. THREADS DETECTION ---
     elif (

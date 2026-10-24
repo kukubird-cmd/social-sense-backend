@@ -13,4 +13,4 @@ tunnel_url.txt
 scratch_*
 bin/
 *.db
-
+*.code-workspace

@@ -39,12 +39,12 @@ APIFY_ACTORS = {
     "tiktok":    "clockworks/free-tiktok-scraper",
     "instagram": "apify/instagram-scraper",
     "twitter":   "apidojo/tweet-scraper",
-    "reddit":    "trudax/reddit-scraper-lite",
     "youtube":   "blackfalcondata/youtube-comment-scraper",
     "threads":   os.getenv("APIFY_ACTOR_THREADS", "omkar-cloud/threads-search-scraper"),
 }
 
 APIFY_BASE = "https://api.apify.com/v2"
+DEFAULT_SCRAPE_LIMIT = 2500
 
 
 def _get_clean_token() -> str:
@@ -67,8 +67,8 @@ class TunnelStartRequest(BaseModel):
 class QuickScrapeRequest(BaseModel):
     company_id: str
     keyword_string: str
-    platforms: Optional[str] = "tiktok,instagram,twitter,reddit,youtube,threads"
-    limit: Optional[int] = 100
+    platforms: Optional[str] = "tiktok,instagram,twitter,youtube,threads"
+    limit: Optional[int] = DEFAULT_SCRAPE_LIMIT
 
 
 @router.get(
@@ -118,8 +118,8 @@ async def set_tunnel_url(req: TunnelUpdateRequest):
     }
 
 
-def _build_actor_input(platform: str, keyword: str, limit: int = 100) -> dict:
-    """Build the platform-specific input schema for each Apify actor with customizable limit (default 100)."""
+def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_LIMIT) -> dict:
+    """Build the platform-specific input schema for each Apify actor to maximize quota and depth."""
     clean_keyword = keyword.replace("#", "").strip()
     is_hashtag = keyword.strip().startswith("#") and " " not in clean_keyword
 
@@ -127,7 +127,7 @@ def _build_actor_input(platform: str, keyword: str, limit: int = 100) -> dict:
         if is_hashtag:
             return {
                 "hashtags": [clean_keyword],
-                "resultsPerPage": limit,
+                "resultsPerPage": min(limit, 100),
                 "maxItems": limit,
                 "shouldDownloadVideos": False,
                 "shouldDownloadCovers": False,
@@ -135,7 +135,7 @@ def _build_actor_input(platform: str, keyword: str, limit: int = 100) -> dict:
         else:
             return {
                 "searchQueries": [clean_keyword],
-                "resultsPerPage": limit,
+                "resultsPerPage": min(limit, 100),
                 "maxItems": limit,
                 "shouldDownloadVideos": False,
                 "shouldDownloadCovers": False,
@@ -151,7 +151,7 @@ def _build_actor_input(platform: str, keyword: str, limit: int = 100) -> dict:
             "searchLimit": limit,
             "resultsType": "posts",
             "resultsLimit": limit,
-            "maxComments": 25,
+            "maxComments": 250,
             "directUrls": direct_urls,
         }
     elif platform == "twitter":
@@ -162,17 +162,6 @@ def _build_actor_input(platform: str, keyword: str, limit: int = 100) -> dict:
             "addUserInfo": True,
             "scrapeTweetReplies": True,
             "sort": "Latest",
-        }
-    elif platform == "reddit":
-        return {
-            "searches": [keyword],
-            "maxItems": limit,
-            "maxPostCount": limit,
-            "sort": "new",
-            "time": "year",
-            "searchPosts": True,
-            "searchComments": True,
-            "skipComments": False,
         }
     elif platform == "youtube":
         return {
@@ -357,8 +346,8 @@ async def trigger_scrape(
     background_tasks: BackgroundTasks,
     company_id: Optional[str] = None,
     webhook_base_url: Optional[str] = None,
-    platforms: str = "tiktok,instagram,twitter,reddit,youtube,threads",
-    limit: int = 100,
+    platforms: str = "tiktok,instagram,twitter,youtube,threads",
+    limit: int = DEFAULT_SCRAPE_LIMIT,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -516,8 +505,8 @@ async def quick_scrape(
     _check_and_lock_scraper(keyword.id, keyword.keyword_string)
 
     active_webhook_url = (webhook_base_url or get_current_url() or "").strip()
-    requested_platforms = [p.strip().lower() for p in (req.platforms or "tiktok,instagram,twitter,reddit,youtube,threads").split(",") if p.strip()]
-    scrape_limit = req.limit or 100
+    requested_platforms = [p.strip().lower() for p in (req.platforms or "tiktok,instagram,twitter,youtube,threads").split(",") if p.strip() and p.strip().lower() != "reddit"]
+    scrape_limit = req.limit or DEFAULT_SCRAPE_LIMIT
     
     if not _get_clean_token():
         _clear_active_scraping()
