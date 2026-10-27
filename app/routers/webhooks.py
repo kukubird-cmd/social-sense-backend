@@ -44,28 +44,71 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
                 logger.warning(f"Apify dataset {dataset_id} returned 0 items.")
                 return
 
-            # 3. Parse & run sentiment analysis
+            def is_relevant(text_to_check: str, kw_str: str) -> bool:
+                t_lower = (text_to_check or "").lower()
+                k_clean = kw_str.replace("#", "").strip().lower()
+                if not k_clean or not t_lower:
+                    return False
+                if k_clean in t_lower:
+                    return True
+                stop_words = {"the", "a", "an", "in", "at", "on", "of", "and", "to", "for", "with", "by", "is", "my", "your"}
+                tokens = [t for t in k_clean.split() if t not in stop_words and len(t) >= 2]
+                if not tokens:
+                    return True
+                if len(tokens) == 1:
+                    return tokens[0] in t_lower
+                if len(tokens) >= 2:
+                    if f"{tokens[0]} {tokens[1]}" in t_lower:
+                        return True
+                matches = sum(1 for t in tokens if t in t_lower)
+                return matches >= (1 if len(tokens) <= 2 else 2)
+
+            # 3. Parse & filter for genuine relevance
             scraped_records = []
+            irrelevant_count = 0
             for item in raw_items:
                 try:
+                    # Check parent post context for relevance
+                    parent_text = (
+                        str(item.get("text") or item.get("desc") or item.get("title") or item.get("caption") or "")
+                    )
+                    parent_is_relevant = is_relevant(parent_text, keyword.keyword_string)
+                    
                     records = parse_apify_item_to_records(item, keyword_id)
-                    scraped_records.extend(records)
+                    for r in records:
+                        # Keep if parent item is relevant, or if the individual comment/post text is relevant
+                        if parent_is_relevant or is_relevant(r.comment_text, keyword.keyword_string):
+                            scraped_records.append(r)
+                        else:
+                            irrelevant_count += 1
                 except Exception as e:
                     logger.error(f"Error parsing item in dataset {dataset_id}: {e}")
 
-            logger.info(f"Parsed {len(scraped_records)} records from Apify dataset {dataset_id}")
+            if irrelevant_count:
+                logger.info(f"Filtered out {irrelevant_count} completely irrelevant algorithmic noise posts for keyword '{keyword.keyword_string}'")
 
-            # 4. Deduplication — skip any post_url already saved for this keyword
+            logger.info(f"Parsed {len(scraped_records)} relevant records from Apify dataset {dataset_id}")
+
+            # 4. Multi-Comment Preserving Deduplication
+            # Deduplicate by (post_url, comment_text) so multiple comments on the same post are NEVER dropped
             if scraped_records:
                 from sqlalchemy import select as sa_select
-                existing_urls_result = await db.execute(
-                    sa_select(ScrapedData.post_url).where(ScrapedData.keyword_id == keyword_id)
+                existing_keys_result = await db.execute(
+                    sa_select(ScrapedData.post_url, ScrapedData.comment_text).where(ScrapedData.keyword_id == keyword_id)
                 )
-                existing_urls = {row[0] for row in existing_urls_result.fetchall()}
-                new_records = [r for r in scraped_records if r.post_url not in existing_urls]
+                existing_keys = {(row[0], (row[1] or "").strip()) for row in existing_keys_result.fetchall()}
+
+                seen_batch = set()
+                new_records = []
+                for r in scraped_records:
+                    key = (r.post_url, (r.comment_text or "").strip())
+                    if key not in existing_keys and key not in seen_batch:
+                        seen_batch.add(key)
+                        new_records.append(r)
+
                 duplicate_count = len(scraped_records) - len(new_records)
                 if duplicate_count:
-                    logger.info(f"Skipped {duplicate_count} duplicate posts already in DB")
+                    logger.info(f"Skipped {duplicate_count} duplicate items already in DB")
                 scraped_records = new_records
 
             # 5. Save records to PostgreSQL

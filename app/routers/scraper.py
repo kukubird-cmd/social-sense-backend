@@ -118,24 +118,67 @@ async def set_tunnel_url(req: TunnelUpdateRequest):
     }
 
 
+def generate_query_variations(keyword: str) -> list[str]:
+    """
+    Decomposes multi-word keywords into high-yield, targeted search variations.
+    For example: 'Play nation TRX the Exchange' ->
+    ['Play nation TRX the Exchange', 'Play nation TRX Exchange', 'Play nation TRX', 'Play nation']
+    This prevents social platform search engines (like TikTok) from returning zero hits
+    and falling back to completely unrelated algorithmic filler.
+    """
+    clean = keyword.replace("#", "").strip()
+    words = clean.split()
+    if len(words) <= 2:
+        return [clean]
+
+    variations = [clean]
+    stop_words = {"the", "a", "an", "in", "at", "on", "of", "and", "to", "for", "with", "by", "is"}
+    sig_words = [w for w in words if w.lower() not in stop_words]
+
+    # Clean version without stop words
+    if len(sig_words) >= 2 and len(sig_words) != len(words):
+        variations.append(" ".join(sig_words))
+
+    # Brand + first location/qualifier (e.g. 'Play nation TRX')
+    if len(words) >= 3:
+        variations.append(f"{words[0]} {words[1]} {words[2]}")
+
+    # Core brand name (e.g. 'Play nation')
+    if len(words) >= 2:
+        variations.append(f"{words[0]} {words[1]}")
+
+    # Location or venue if separate
+    if len(words) >= 4 and any(w.lower() in ("trx", "exchange", "mall") for w in words):
+        venue_words = [w for w in words if w.lower() in ("trx", "exchange", "the", "mall")]
+        if venue_words:
+            variations.append(" ".join(venue_words))
+
+    seen = set()
+    deduped = []
+    for v in variations:
+        v_clean = v.strip()
+        v_lower = v_clean.lower()
+        if v_lower not in seen and len(v_clean) >= 2:
+            seen.add(v_lower)
+            deduped.append(v_clean)
+
+    return deduped[:5]
+
+
 def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_LIMIT) -> dict:
     """
-    Build platform-specific Apify actor input.
-    Fixed at 1000 posts per platform:
-      TikTok:    1000 videos (100 per page × 10 pages)
-      Instagram: 1000 posts + 100 comments each
-      X/Twitter: 1000 tweets + replies
-      YouTube:   1000 comments
-    Total: 4 platforms × 1000 = 4,000 per keyword.
+    Build platform-specific Apify actor input using multi-query expansion.
+    Scrapes without artificial bottlenecks or low caps.
     """
     clean_keyword = keyword.replace("#", "").strip()
     is_hashtag = keyword.strip().startswith("#") and " " not in clean_keyword
+    variations = generate_query_variations(keyword)
 
     if platform == "tiktok":
-        # resultsPerPage capped at 100 by TikTok API — maxItems drives pagination up to `limit`
         if is_hashtag:
+            tags = [clean_keyword] + [v.replace(" ", "") for v in variations[1:] if v.replace(" ", "")]
             return {
-                "hashtags": [clean_keyword],
+                "hashtags": tags,
                 "resultsPerPage": 100,
                 "maxItems": limit,
                 "shouldDownloadVideos": False,
@@ -143,29 +186,27 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
             }
         else:
             return {
-                "searchQueries": [clean_keyword],
+                "searchQueries": variations,
                 "resultsPerPage": 100,
                 "maxItems": limit,
                 "shouldDownloadVideos": False,
                 "shouldDownloadCovers": False,
             }
     elif platform == "instagram":
-        tag = clean_keyword.replace(" ", "")
-        direct_urls = [f"https://www.instagram.com/explore/tags/{tag}/"]
-        if not is_hashtag:
-            direct_urls.append(f"https://www.instagram.com/{tag}/")
+        tag_list = [v.replace(" ", "").lower() for v in variations if v.replace(" ", "")]
+        direct_urls = [f"https://www.instagram.com/explore/tags/{t}/" for t in tag_list[:3]]
         return {
-            "search": clean_keyword,
+            "search": variations[0] if variations else clean_keyword,
             "searchType": "hashtag",
             "searchLimit": limit,
             "resultsType": "posts",
             "resultsLimit": limit,
-            "maxComments": 100,
+            "maxComments": limit,
             "directUrls": direct_urls,
         }
     elif platform == "twitter":
         return {
-            "searchTerms": [keyword],
+            "searchTerms": variations,
             "maxItems": limit,
             "sort": "Latest",
             "addUserInfo": True,
@@ -173,21 +214,22 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
         }
     elif platform == "youtube":
         return {
-            "searchQueries": [clean_keyword],
+            "searchQueries": variations,
             "maxComments": limit,
             "sort": "top",
         }
     elif platform == "threads":
         if is_hashtag:
+            tags = [clean_keyword] + [v.replace(" ", "") for v in variations[1:] if v.replace(" ", "")]
             return {
-                "hashtags": [clean_keyword],
-                "searchQueries": [clean_keyword],
+                "hashtags": tags,
+                "searchQueries": variations,
                 "maxItems": limit,
                 "resultsLimit": limit,
             }
         else:
             return {
-                "searchQueries": [clean_keyword],
+                "searchQueries": variations,
                 "maxItems": limit,
                 "resultsLimit": limit,
             }

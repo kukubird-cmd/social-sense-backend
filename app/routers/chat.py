@@ -134,17 +134,10 @@ async def chat_with_database(req: ChatRequest, db: AsyncSession = Depends(get_db
                 "total_records_available": len(all_fetched),
                 "topic_options": []
             }
-        records = platform_records[:80]
+        records = platform_records
     else:
-        # Balanced stratified sampling across all available platforms
-        by_platform: dict = {}
-        for r in all_fetched:
-            p = r.get("platform", "unknown")
-            by_platform.setdefault(p, []).append(r)
-        
-        records = []
-        for p, plist in by_platform.items():
-            records.extend(plist[:16])  # up to 16 per platform = max 80 total evenly spread
+        # All scraped records passed to Gemini without artificial bottlenecks
+        records = all_fetched
 
     # 2. Call Gemini with the scraped records as context and active topic context
     try:

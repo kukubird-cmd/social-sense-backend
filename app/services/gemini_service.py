@@ -228,12 +228,12 @@ async def chat_with_scraped_data(
     Answers user queries grounded strictly on the database of scraped social media posts,
     with topic disambiguation and precision filtering.
     """
-    # Prioritize genuine viewer comments & earned media; deprioritize self-promotional owned posts
+    # Prioritize genuine viewer comments & earned media; retain all records without hardcoded caps
     earned_records = [r for r in scraped_records if not r.get("is_owned_media")]
     owned_records = [r for r in scraped_records if r.get("is_owned_media")]
     
-    # Send up to 120 real viewer comments and at most 15 owned posts for background context
-    prioritized_records = earned_records[:120] + owned_records[:15] if earned_records else scraped_records[:120]
+    # Include all scraped records (genuine viewer comments + owned posts)
+    prioritized_records = earned_records + owned_records if earned_records else scraped_records
 
     cleaned_records = []
     for r in prioritized_records:
@@ -251,7 +251,7 @@ async def chat_with_scraped_data(
             "media_type": "Owned Promotional Copy" if is_owned else "Viewer/User Comment",
             "author": author,
             "date": str(orig_date)[:25],
-            "content": text[:350],
+            "content": text[:1500],
             "metrics": metrics,
             "url": r.get("post_url", "")
         })
@@ -289,7 +289,7 @@ async def chat_with_scraped_data(
         + context_guidance
     )
 
-    prompt = f"""Here is the database of recent scraped social media records (Total: {len(scraped_records)} available, sample of {len(cleaned_records)} provided below):
+    prompt = f"""Here is the complete database of scraped social media records (Total: {len(cleaned_records)} records in database provided below):
 {records_json}
 
 Active Keyword Filter: {keyword_filter or 'All Tracked Keywords'}
