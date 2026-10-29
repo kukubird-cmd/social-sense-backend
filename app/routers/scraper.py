@@ -198,7 +198,7 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
         return {
             "search": variations[0] if variations else clean_keyword,
             "searchType": "hashtag",
-            "searchLimit": limit,
+            "searchLimit": min(limit, 250),
             "resultsType": "posts",
             "resultsLimit": limit,
             "maxComments": limit,

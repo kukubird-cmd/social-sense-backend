@@ -76,8 +76,16 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
                     
                     records = parse_apify_item_to_records(item, keyword_id)
                     for r in records:
-                        # Keep if parent item is relevant, or if the individual comment/post text is relevant
-                        if parent_is_relevant or is_relevant(r.comment_text, keyword.keyword_string):
+                        # YouTube comment scrapers target videos matching the keyword query directly.
+                        # Viewers rarely repeat the full keyword in short reactions ("Subscribed!", "Where is this?").
+                        # Keep comments from keyword-targeted YouTube scraper runs, or any post/comment matching the keyword.
+                        is_targeted_comment = (
+                            r.platform == "youtube"
+                            or item.get("datasetType") == "comment"
+                            or "videoId" in item
+                            or "commentId" in item
+                        )
+                        if is_targeted_comment or parent_is_relevant or is_relevant(r.comment_text, keyword.keyword_string):
                             scraped_records.append(r)
                         else:
                             irrelevant_count += 1

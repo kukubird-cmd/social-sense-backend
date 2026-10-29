@@ -82,14 +82,14 @@ async def fetch_apify_dataset_items(dataset_id: str) -> List[Dict[str, Any]]:
                         return [d for d in data if not d.get("noResults") and not d.get("error")]
                     return []
 
-                # Check if this token ran out of quota or hits payment limit
-                if token_pool.is_quota_or_billing_error(response.status_code, response.text):
+                # Check if this token ran out of quota, lacks dataset permission, or is unauthorized
+                if response.status_code in (401, 403) or token_pool.is_quota_or_billing_error(response.status_code, response.text):
                     token_pool.mark_exhausted(token, f"Dataset HTTP {response.status_code}: {response.text[:150]}")
-                    continue  # Try next backup token
+                    continue  # Try next candidate backup token immediately
 
                 response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            if token_pool.is_quota_or_billing_error(e.response.status_code, e.response.text):
+            if e.response.status_code in (401, 403) or token_pool.is_quota_or_billing_error(e.response.status_code, e.response.text):
                 token_pool.mark_exhausted(token, f"Dataset HTTP {e.response.status_code}: {e.response.text[:150]}")
                 continue
             logger.error(f"Failed to fetch live Apify dataset {dataset_id}: {e}")
@@ -287,7 +287,16 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
     # --- 5. X / TWITTER DETECTION ---
     elif "twitterUrl" in item or "tweetId" in item or "retweetCount" in item or "full_text" in item:
         platform = "twitter"
-        author = item.get("user", {}).get("screen_name") or item.get("author") or "X User"
+        author_data = item.get("author") or item.get("user") or {}
+        if isinstance(author_data, dict):
+            author = author_data.get("userName") or author_data.get("screen_name") or author_data.get("name") or "X User"
+        elif isinstance(author_data, str) and author_data.strip():
+            author = author_data.strip()
+        else:
+            author = "X User"
+        author_str = str(author)
+        author_formatted = f"@{author_str}" if not author_str.startswith("@") else author_str
+
         post_url = item.get("twitterUrl") or item.get("url") or f"https://x.com/i/web/status/{item.get('id_str', item.get('id', ''))}"
         comment_text = item.get("full_text") or item.get("text") or ""
         is_reply = bool(item.get("in_reply_to_status_id") or item.get("inReplyToStatusId"))
@@ -296,7 +305,7 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
             "retweets": item.get("retweet_count", 0) or item.get("retweetCount", 0),
             "replies": item.get("reply_count", 0) or item.get("replyCount", 0),
             "post_type": "reply" if is_reply else "post",
-            "author": f"@{author}" if not author.startswith("@") else author
+            "author": author_formatted
         }
 
     # --- 6. REDDIT (IGNORED / DEPRECATED) ---
