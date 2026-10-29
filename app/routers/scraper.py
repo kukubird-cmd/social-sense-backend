@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api/scraper", tags=["Live Scraper"])
 # Apify Actor IDs — Battle-tested public actors for all 5 platforms
 # ---------------------------------------------------------------------------
 APIFY_ACTORS = {
-    "tiktok":    "clockworks/free-tiktok-scraper",
+    "tiktok":    os.getenv("APIFY_ACTOR_TIKTOK", "xmolodtsov/tiktok-search-scraper"),
     "instagram": "apify/instagram-scraper",
     "twitter":   "apidojo/tweet-scraper",
     "youtube":   "blackfalcondata/youtube-comment-scraper",
@@ -175,22 +175,31 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
     variations = generate_query_variations(keyword)
 
     if platform == "tiktok":
-        if is_hashtag:
-            tags = [clean_keyword] + [v.replace(" ", "") for v in variations[1:] if v.replace(" ", "")]
-            return {
-                "hashtags": tags,
-                "resultsPerPage": 100,
-                "maxItems": limit,
-                "shouldDownloadVideos": False,
-                "shouldDownloadCovers": False,
-            }
+        actor_name = APIFY_ACTORS.get("tiktok", "").lower()
+        if "clockworks" in actor_name:
+            if is_hashtag:
+                tags = [clean_keyword] + [v.replace(" ", "") for v in variations[1:] if v.replace(" ", "")]
+                return {
+                    "hashtags": tags,
+                    "resultsPerPage": 100,
+                    "maxItems": limit,
+                    "shouldDownloadVideos": False,
+                    "shouldDownloadCovers": False,
+                }
+            else:
+                return {
+                    "searchQueries": variations,
+                    "resultsPerPage": 100,
+                    "maxItems": limit,
+                    "shouldDownloadVideos": False,
+                    "shouldDownloadCovers": False,
+                }
         else:
+            # Modern, proxy-enabled TikTok scrapers (xmolodtsov/tiktok-search-scraper or apidojo/tiktok-scraper)
             return {
-                "searchQueries": variations,
-                "resultsPerPage": 100,
+                "keywords": variations,
                 "maxItems": limit,
-                "shouldDownloadVideos": False,
-                "shouldDownloadCovers": False,
+                "sortType": "RELEVANCE",
             }
     elif platform == "instagram":
         tag_list = [v.replace(" ", "").lower() for v in variations if v.replace(" ", "")]

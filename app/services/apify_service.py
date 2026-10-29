@@ -2,7 +2,7 @@ import uuid
 import httpx
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from app.config import settings
 from app.models import ScrapedData
@@ -128,6 +128,8 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
     If the item contains nested viewer comments (e.g. YouTube video with comments array),
     both the root and all comments are extracted as distinct ScrapedData records.
     """
+    if not isinstance(item, dict):
+        return []
     results: List[ScrapedData] = []
     platform = "unknown"
     post_url = ""
@@ -207,17 +209,26 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
                 ))
 
     # --- 3. TIKTOK DETECTION ---
-    elif "webVideoUrl" in item or "videoMeta" in item or "authorMeta" in item:
+    elif "webVideoUrl" in item or "videoMeta" in item or "authorMeta" in item or "postPage" in item or ("channel" in item and "views" in item):
         platform = "tiktok"
-        author_meta = item.get("authorMeta") or {}
-        author = author_meta.get("name") or author_meta.get("nickName") or item.get("author") or "TikTok User"
-        post_url = item.get("webVideoUrl") or f"https://www.tiktok.com/@{author}/video/{item.get('id', '')}"
-        comment_text = item.get("text") or item.get("desc") or ""
+        channel = item.get("channel") if isinstance(item.get("channel"), dict) else {}
+        author_meta = item.get("authorMeta") if isinstance(item.get("authorMeta"), dict) else {}
+        author = (
+            channel.get("username")
+            or channel.get("name")
+            or author_meta.get("name")
+            or author_meta.get("nickName")
+            or item.get("author")
+            or "TikTok User"
+        )
+        post_url = item.get("postPage") or item.get("webVideoUrl") or f"https://www.tiktok.com/@{author}/video/{item.get('id', '')}"
+        comment_text = item.get("title") or item.get("text") or item.get("desc") or ""
         metrics = {
-            "views": item.get("playCount", 0),
-            "likes": item.get("diggCount", 0),
-            "shares": item.get("shareCount", 0),
-            "comments": item.get("commentCount", 0),
+            "views": item.get("views") if item.get("views") is not None else item.get("playCount", 0),
+            "likes": item.get("likes") if item.get("likes") is not None else item.get("diggCount", 0),
+            "shares": item.get("shares") if item.get("shares") is not None else item.get("shareCount", 0),
+            "comments": item.get("comments") if item.get("comments") is not None else item.get("commentCount", 0),
+            "bookmarks": item.get("bookmarks", 0),
             "post_type": "post",
             "author": author
         }
@@ -407,14 +418,19 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
     # Sentiment analysis with new multilingual engine
     sentiment = analyze_sentiment_claude(clean_text)
 
-    # Parse ISO timestamp if available
-    for ts_field in ("publishedAt", "createTimeISO", "createdAt", "date", "publishedTime", "timestamp"):
+    # Parse ISO or Unix timestamp if available
+    for ts_field in ("uploadedAtFormatted", "publishedAt", "createTimeISO", "createdAt", "date", "publishedTime", "timestamp"):
         if ts_field in item and item[ts_field]:
             try:
                 timestamp = datetime.fromisoformat(str(item[ts_field]).replace("Z", "+00:00"))
                 break
             except Exception:
                 pass
+    if "uploadedAt" in item and isinstance(item["uploadedAt"], (int, float)) and item["uploadedAt"] > 0:
+        try:
+            timestamp = datetime.fromtimestamp(item["uploadedAt"], tz=timezone.utc)
+        except Exception:
+            pass
 
     primary_record = ScrapedData(
         keyword_id=keyword_id,
