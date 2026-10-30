@@ -8,10 +8,12 @@ import os
 import uuid
 import logging
 import asyncio
+import calendar
+from datetime import datetime, timedelta, timezone
 import httpx
-from typing import Optional
+from typing import Optional, Tuple
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -19,6 +21,62 @@ from app.config import settings
 from app.database import get_db
 from app.models import Keyword, Company
 from app.schemas import KeywordCreate
+
+
+def parse_timeline_bounds(start_str: Optional[str], end_str: Optional[str]) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """
+    Parses flexible date inputs:
+    - "2026-09" -> start: 2026-09-01 00:00:00, end: 2026-09-30 23:59:59
+    - "2026-09-15" -> 2026-09-15 00:00:00
+    - ISO timestamps
+    Returns (start_dt, end_dt) as UTC datetimes without tzinfo for DB consistency.
+    """
+    s_dt, e_dt = None, None
+    if start_str:
+        s_clean = start_str.strip()
+        if len(s_clean) == 7 and s_clean[4] == '-':
+            try:
+                y, m = int(s_clean[:4]), int(s_clean[5:7])
+                s_dt = datetime(y, m, 1, 0, 0, 0)
+                if not end_str:
+                    last_day = calendar.monthrange(y, m)[1]
+                    e_dt = datetime(y, m, last_day, 23, 59, 59)
+            except Exception:
+                pass
+        elif len(s_clean) == 10 and s_clean[4] == '-' and s_clean[7] == '-':
+            try:
+                y, m, d = int(s_clean[:4]), int(s_clean[5:7]), int(s_clean[8:10])
+                s_dt = datetime(y, m, d, 0, 0, 0)
+            except Exception:
+                pass
+        else:
+            try:
+                s_dt = datetime.fromisoformat(s_clean.replace('Z', '+00:00')).replace(tzinfo=None)
+            except Exception:
+                pass
+
+    if end_str and not e_dt:
+        e_clean = end_str.strip()
+        if len(e_clean) == 7 and e_clean[4] == '-':
+            try:
+                y, m = int(e_clean[:4]), int(e_clean[5:7])
+                last_day = calendar.monthrange(y, m)[1]
+                e_dt = datetime(y, m, last_day, 23, 59, 59)
+            except Exception:
+                pass
+        elif len(e_clean) == 10 and e_clean[4] == '-' and e_clean[7] == '-':
+            try:
+                y, m, d = int(e_clean[:4]), int(e_clean[5:7]), int(e_clean[8:10])
+                e_dt = datetime(y, m, d, 23, 59, 59)
+            except Exception:
+                pass
+        else:
+            try:
+                e_dt = datetime.fromisoformat(e_clean.replace('Z', '+00:00')).replace(tzinfo=None)
+            except Exception:
+                pass
+
+    return s_dt, e_dt
 from app.services.billing_service import create_keyword_for_company
 from app.services.tunnel_manager import (
     get_tunnel_status as tm_get_tunnel_status,
@@ -69,6 +127,8 @@ class QuickScrapeRequest(BaseModel):
     keyword_string: str
     platforms: Optional[str] = "tiktok,instagram,twitter,youtube,threads"
     limit: Optional[int] = DEFAULT_SCRAPE_LIMIT
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
 
 @router.get(
@@ -165,10 +225,16 @@ def generate_query_variations(keyword: str) -> list[str]:
     return deduped[:5]
 
 
-def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_LIMIT) -> dict:
+def _build_actor_input(
+    platform: str,
+    keyword: str,
+    limit: int = DEFAULT_SCRAPE_LIMIT,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
     """
     Build platform-specific Apify actor input using multi-query expansion.
-    Scrapes without artificial bottlenecks or low caps.
+    Scrapes without artificial bottlenecks or low caps, and passes timeline filters where supported.
     """
     clean_keyword = keyword.replace("#", "").strip()
     is_hashtag = keyword.strip().startswith("#") and " " not in clean_keyword
@@ -199,12 +265,12 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
             return {
                 "keywords": variations,
                 "maxItems": limit,
-                "sortType": "RELEVANCE",
+                "sortType": "DATE_POSTED" if (start_date or end_date) else "RELEVANCE",
             }
     elif platform == "instagram":
         tag_list = [v.replace(" ", "").lower() for v in variations if v.replace(" ", "")]
         direct_urls = [f"https://www.instagram.com/explore/tags/{t}/" for t in tag_list[:3]]
-        return {
+        inp = {
             "search": variations[0] if variations else clean_keyword,
             "searchType": "hashtag",
             "searchLimit": min(limit, 250),
@@ -213,9 +279,21 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
             "maxComments": limit,
             "directUrls": direct_urls,
         }
+        if start_date:
+            inp["onlyPostsNewerThan"] = start_date.strftime("%Y-%m-%d")
+        return inp
     elif platform == "twitter":
+        terms = list(variations)
+        if start_date or end_date:
+            date_filter = ""
+            if start_date:
+                date_filter += f" since:{start_date.strftime('%Y-%m-%d')}"
+            if end_date:
+                until_day = (end_date + timedelta(days=1)).strftime('%Y-%m-%d') if (end_date.hour >= 23 or end_date.hour == 0) else end_date.strftime('%Y-%m-%d')
+                date_filter += f" until:{until_day}"
+            terms = [f"{t}{date_filter}".strip() for t in terms]
         return {
-            "searchTerms": variations,
+            "searchTerms": terms,
             "maxItems": limit,
             "sort": "Latest",
             "addUserInfo": True,
@@ -225,9 +303,11 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
         return {
             "searchQueries": variations,
             "maxComments": limit,
-            "sort": "top",
+            "sort": "newest" if (start_date or end_date) else "top",
+            "sortBy": "newest" if (start_date or end_date) else "top",
         }
     elif platform == "threads":
+        sort_mode = "recent" if (start_date or end_date) else "top"
         if is_hashtag:
             tags = [clean_keyword] + [v.replace(" ", "") for v in variations[1:] if v.replace(" ", "")]
             return {
@@ -235,12 +315,14 @@ def _build_actor_input(platform: str, keyword: str, limit: int = DEFAULT_SCRAPE_
                 "searchQueries": variations,
                 "maxItems": limit,
                 "resultsLimit": limit,
+                "sort": sort_mode,
             }
         else:
             return {
                 "searchQueries": variations,
                 "maxItems": limit,
                 "resultsLimit": limit,
+                "sort": sort_mode,
             }
     return {}
 
@@ -251,6 +333,8 @@ async def _trigger_actor(
     keyword_id: uuid.UUID,
     webhook_base_url: Optional[str] = None,
     limit: int = DEFAULT_SCRAPE_LIMIT,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
 ) -> dict:
     """
     Launches a single Apify Actor run for the given platform + keyword.
@@ -267,7 +351,7 @@ async def _trigger_actor(
     if not candidate_tokens:
         raise RuntimeError("No Apify API tokens configured on server.")
 
-    actor_input = _build_actor_input(platform, keyword_string, limit=limit)
+    actor_input = _build_actor_input(platform, keyword_string, limit=limit, start_date=start_date, end_date=end_date)
     last_err = None
 
     for token_idx, token in enumerate(candidate_tokens):
@@ -278,6 +362,10 @@ async def _trigger_actor(
         if webhook_base_url and ("http://" in webhook_base_url or "https://" in webhook_base_url) and "localhost" not in webhook_base_url:
             import json, base64
             webhook_url = f"{webhook_base_url.rstrip('/')}/api/webhooks/apify?keyword_id={keyword_id}"
+            if start_date:
+                webhook_url += f"&start_date={start_date.isoformat()}"
+            if end_date:
+                webhook_url += f"&end_date={end_date.isoformat()}"
             webhook_cfg = [
                 {
                     "eventTypes": ["ACTOR.RUN.SUCCEEDED"],
@@ -313,7 +401,13 @@ async def _trigger_actor(
     raise RuntimeError(last_err or f"Failed to trigger {platform} across all configured Apify tokens")
 
 
-async def _poll_and_ingest_run(run_id: str, keyword_id: uuid.UUID, platform: str):
+async def _poll_and_ingest_run(
+    run_id: str,
+    keyword_id: uuid.UUID,
+    platform: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
     """
     Bulletproof automatic background poller:
     Monitors an Apify run until finished, then directly fetches the dataset
@@ -339,7 +433,12 @@ async def _poll_and_ingest_run(run_id: str, keyword_id: uuid.UUID, platform: str
                             dataset_id = data.get("defaultDatasetId")
                             logger.info(f"🎉 Apify [{platform}] run {run_id} SUCCEEDED! Ingesting dataset {dataset_id}...")
                             if dataset_id:
-                                await process_apify_dataset_task(dataset_id=dataset_id, keyword_id=keyword_id)
+                                await process_apify_dataset_task(
+                                    dataset_id=dataset_id,
+                                    keyword_id=keyword_id,
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                )
                             return
                         elif run_status in ("FAILED", "ABORTED", "TIMED-OUT"):
                             logger.warning(f"Apify [{platform}] run {run_id} ended with status: {run_status}")
@@ -407,11 +506,14 @@ async def trigger_scrape(
     webhook_base_url: Optional[str] = None,
     platforms: str = "tiktok,instagram,twitter,youtube,threads",
     limit: int = DEFAULT_SCRAPE_LIMIT,
+    start_date: Optional[str] = Query(None, description="Timeline start date (e.g. 2026-09 or 2026-09-01)"),
+    end_date: Optional[str] = Query(None, description="Timeline end date (e.g. 2026-09-30)"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Triggers a live Apify scrape across requested platforms for the given keyword.
     Strictly permits only registered companies to scrape keywords they own.
+    Supports optional timeline boundaries (e.g. September 2026).
     """
     stmt = select(Keyword).where(Keyword.id == keyword_id, Keyword.is_active.is_(True))
     result = await db.execute(stmt)
@@ -474,6 +576,7 @@ async def trigger_scrape(
         )
 
     active_webhook_url = (webhook_base_url or get_current_url() or "").strip()
+    start_dt, end_dt = parse_timeline_bounds(start_date, end_date)
 
     # Fire all platform scrapers concurrently in background with auto-ingestion
     background_tasks.add_task(
@@ -483,6 +586,8 @@ async def trigger_scrape(
         webhook_base_url=active_webhook_url,
         requested_platforms=requested_platforms,
         limit=limit,
+        start_date=start_dt,
+        end_date=end_dt,
     )
 
     return {
@@ -566,6 +671,7 @@ async def quick_scrape(
     active_webhook_url = (webhook_base_url or get_current_url() or "").strip()
     requested_platforms = [p.strip().lower() for p in (req.platforms or "tiktok,instagram,twitter,youtube,threads").split(",") if p.strip() and p.strip().lower() != "reddit"]
     scrape_limit = req.limit or DEFAULT_SCRAPE_LIMIT
+    start_dt, end_dt = parse_timeline_bounds(req.start_date, req.end_date)
     
     if not _get_clean_token():
         _clear_active_scraping()
@@ -581,6 +687,8 @@ async def quick_scrape(
         webhook_base_url=active_webhook_url,
         requested_platforms=requested_platforms,
         limit=scrape_limit,
+        start_date=start_dt,
+        end_date=end_dt,
     )
 
     return {
@@ -704,6 +812,8 @@ async def _launch_all_platforms(
     webhook_base_url: str,
     requested_platforms: list,
     limit: int = DEFAULT_SCRAPE_LIMIT,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
 ):
     """Background coroutine: launches Apify actors for each platform and starts auto-pollers."""
     current_task = asyncio.current_task()
@@ -715,7 +825,9 @@ async def _launch_all_platforms(
         await ws_manager.broadcast_to_all({
             "event": "SCRAPING_STARTED",
             "keyword_string": keyword_string,
-            "keyword_id": str(keyword_id)
+            "keyword_id": str(keyword_id),
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
         })
     except Exception:
         pass
@@ -723,18 +835,29 @@ async def _launch_all_platforms(
     try:
         for platform in requested_platforms:
             try:
-                run = await _trigger_actor(platform, keyword_string, keyword_id, webhook_base_url, limit=limit)
+                run = await _trigger_actor(
+                    platform,
+                    keyword_string,
+                    keyword_id,
+                    webhook_base_url,
+                    limit=limit,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
                 run_id = run.get("id")
                 if run_id:
                     _ACTIVE_RUN_IDS.add(run_id)
                 logger.info(
                     f"✅ Apify [{platform}] actor started | "
                     f"keyword='{keyword_string}' | runId={run_id} | "
-                    f"status={run.get('status')}"
+                    f"status={run.get('status')} | "
+                    f"timeline={start_date}..{end_date}"
                 )
                 if run_id:
                     # Spawn background poller to auto-ingest as soon as it completes
-                    poller_task = asyncio.create_task(_poll_and_ingest_run(run_id, keyword_id, platform))
+                    poller_task = asyncio.create_task(
+                        _poll_and_ingest_run(run_id, keyword_id, platform, start_date=start_date, end_date=end_date)
+                    )
                     _ACTIVE_SCRAPE_TASKS.add(poller_task)
                     poller_task.add_done_callback(lambda t: _ACTIVE_SCRAPE_TASKS.discard(t))
             except Exception as e:

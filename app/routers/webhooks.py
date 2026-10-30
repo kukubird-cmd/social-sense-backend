@@ -1,5 +1,6 @@
 import uuid
 import logging
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +16,12 @@ logger = logging.getLogger("apify_webhook")
 router = APIRouter(prefix="/api/webhooks", tags=["Apify Webhooks"])
 
 
-async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
+async def process_apify_dataset_task(
+    dataset_id: str,
+    keyword_id: uuid.UUID,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
     """
     Background Task:
     1. Downloads items from Apify Dataset API.
@@ -63,9 +69,10 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
                 matches = sum(1 for t in tokens if t in t_lower)
                 return matches >= (1 if len(tokens) <= 2 else 2)
 
-            # 3. Parse & filter for genuine relevance
+            # 3. Parse & filter for genuine relevance and timeline bounds
             scraped_records = []
             irrelevant_count = 0
+            out_of_timeline_count = 0
             for item in raw_items:
                 try:
                     # Check parent post context for relevance
@@ -76,6 +83,27 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
                     
                     records = parse_apify_item_to_records(item, keyword_id)
                     for r in records:
+                        # Timeline boundary filter
+                        if start_date:
+                            r_ts = r.timestamp
+                            if r_ts and r_ts.tzinfo is not None and start_date.tzinfo is None:
+                                r_ts = r_ts.replace(tzinfo=None)
+                            elif r_ts and r_ts.tzinfo is None and start_date.tzinfo is not None:
+                                start_date = start_date.replace(tzinfo=None)
+                            if r_ts and r_ts < start_date:
+                                out_of_timeline_count += 1
+                                continue
+
+                        if end_date:
+                            r_ts = r.timestamp
+                            if r_ts and r_ts.tzinfo is not None and end_date.tzinfo is None:
+                                r_ts = r_ts.replace(tzinfo=None)
+                            elif r_ts and r_ts.tzinfo is None and end_date.tzinfo is not None:
+                                end_date = end_date.replace(tzinfo=None)
+                            if r_ts and r_ts > end_date:
+                                out_of_timeline_count += 1
+                                continue
+
                         # YouTube comment scrapers target videos matching the keyword query directly.
                         # Viewers rarely repeat the full keyword in short reactions ("Subscribed!", "Where is this?").
                         # Keep comments from keyword-targeted YouTube scraper runs, or any post/comment matching the keyword.
@@ -92,6 +120,8 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
                 except Exception as e:
                     logger.error(f"Error parsing item in dataset {dataset_id}: {e}")
 
+            if out_of_timeline_count:
+                logger.info(f"Filtered out {out_of_timeline_count} posts outside specified timeline for keyword '{keyword.keyword_string}'")
             if irrelevant_count:
                 logger.info(f"Filtered out {irrelevant_count} completely irrelevant algorithmic noise posts for keyword '{keyword.keyword_string}'")
 
@@ -159,13 +189,17 @@ async def process_apify_dataset_task(dataset_id: str, keyword_id: uuid.UUID):
 async def handle_apify_webhook(
     payload: ApifyWebhookPayload,
     background_tasks: BackgroundTasks,
-    keyword_id: uuid.UUID = Query(..., description="UUID of the keyword being tracked")
+    keyword_id: uuid.UUID = Query(..., description="UUID of the keyword being tracked"),
+    start_date: Optional[str] = Query(None, description="Timeline start date (YYYY-MM, YYYY-MM-DD, or ISO)"),
+    end_date: Optional[str] = Query(None, description="Timeline end date (YYYY-MM, YYYY-MM-DD, or ISO)")
 ):
     """
     Webhook Endpoint called by Apify when an actor run finishes.
     
-    Query Parameter:
+    Query Parameters:
     - `keyword_id`: UUID of the tracked keyword in our database.
+    - `start_date`: Optional start date filter.
+    - `end_date`: Optional end date filter.
     
     Dispatches asynchronous background ingestion to respond to Apify within 100ms.
     """
@@ -176,13 +210,18 @@ async def handle_apify_webhook(
             detail="Payload missing defaultDatasetId."
         )
 
-    logger.info(f"Received Apify webhook for keyword {keyword_id} with dataset {dataset_id}")
+    logger.info(f"Received Apify webhook for keyword {keyword_id} with dataset {dataset_id} (timeline: {start_date} to {end_date})")
+
+    from app.routers.scraper import parse_timeline_bounds
+    start_dt, end_dt = parse_timeline_bounds(start_date, end_date)
 
     # Offload heavy dataset download & processing to background task
     background_tasks.add_task(
         process_apify_dataset_task,
         dataset_id=dataset_id,
-        keyword_id=keyword_id
+        keyword_id=keyword_id,
+        start_date=start_dt,
+        end_date=end_dt
     )
 
     return {
