@@ -178,40 +178,32 @@ async def set_tunnel_url(req: TunnelUpdateRequest):
     }
 
 
-def generate_query_variations(keyword: str) -> list[str]:
+def generate_query_variations(keyword: str, topic_context: Optional[str] = None) -> list[str]:
     """
-    Decomposes multi-word keywords into high-yield, targeted search variations.
-    For example: 'Play nation TRX the Exchange' ->
-    ['Play nation TRX the Exchange', 'Play nation TRX Exchange', 'Play nation TRX', 'Play nation']
-    This prevents social platform search engines (like TikTok) from returning zero hits
-    and falling back to completely unrelated algorithmic filler.
+    Decomposes multi-word keywords and integrates business topic_context into high-yield search variations.
+    Ensures targeted context (e.g. 'game centers', 'board games, TRX') takes priority over generic brand noise.
     """
     clean = keyword.replace("#", "").strip()
+    variations = []
+
+    # 1. Prioritize brand + topic_context combinations if context is specified
+    if topic_context and topic_context.strip():
+        tc_clean = topic_context.replace("#", "").strip()
+        variations.append(f"{clean} {tc_clean}")
+        sub_topics = [s.strip() for s in tc_clean.replace(";", ",").split(",") if s.strip()]
+        for st in sub_topics:
+            if st.lower() != tc_clean.lower() and len(st) >= 2:
+                variations.append(f"{clean} {st}")
+
+    # 2. Add base clean keyword
+    variations.append(clean)
+
+    # 3. Add brand sub-combinations
     words = clean.split()
-    if len(words) <= 2:
-        return [clean]
-
-    variations = [clean]
-    stop_words = {"the", "a", "an", "in", "at", "on", "of", "and", "to", "for", "with", "by", "is"}
-    sig_words = [w for w in words if w.lower() not in stop_words]
-
-    # Clean version without stop words
-    if len(sig_words) >= 2 and len(sig_words) != len(words):
-        variations.append(" ".join(sig_words))
-
-    # Brand + first location/qualifier (e.g. 'Play nation TRX')
     if len(words) >= 3:
         variations.append(f"{words[0]} {words[1]} {words[2]}")
-
-    # Core brand name (e.g. 'Play nation')
     if len(words) >= 2:
         variations.append(f"{words[0]} {words[1]}")
-
-    # Location or venue if separate
-    if len(words) >= 4 and any(w.lower() in ("trx", "exchange", "mall") for w in words):
-        venue_words = [w for w in words if w.lower() in ("trx", "exchange", "the", "mall")]
-        if venue_words:
-            variations.append(" ".join(venue_words))
 
     seen = set()
     deduped = []
@@ -231,14 +223,15 @@ def _build_actor_input(
     limit: int = DEFAULT_SCRAPE_LIMIT,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    topic_context: Optional[str] = None,
 ) -> dict:
     """
-    Build platform-specific Apify actor input using multi-query expansion.
+    Build platform-specific Apify actor input using multi-query expansion and business topic_context.
     Scrapes without artificial bottlenecks or low caps, and passes timeline filters where supported.
     """
     clean_keyword = keyword.replace("#", "").strip()
     is_hashtag = keyword.strip().startswith("#") and " " not in clean_keyword
-    variations = generate_query_variations(keyword)
+    variations = generate_query_variations(keyword, topic_context=topic_context)
 
     if platform == "tiktok":
         actor_name = APIFY_ACTORS.get("tiktok", "").lower()
@@ -404,12 +397,20 @@ async def _trigger_actor(
     limit: int = DEFAULT_SCRAPE_LIMIT,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    topic_context: Optional[str] = None,
 ) -> dict:
     """
-    Launches a single Apify Actor run for the given platform + keyword.
+    Launches a single Apify Actor run for the given platform + keyword + topic_context.
     """
     actor_id_raw = APIFY_ACTORS[platform]
-    actor_input = _build_actor_input(platform, keyword_string, limit=limit, start_date=start_date, end_date=end_date)
+    actor_input = _build_actor_input(
+        platform,
+        keyword_string,
+        limit=limit,
+        start_date=start_date,
+        end_date=end_date,
+        topic_context=topic_context,
+    )
     return await _trigger_raw_actor(
         actor_id_raw=actor_id_raw,
         actor_input=actor_input,
@@ -704,6 +705,7 @@ async def trigger_scrape(
         limit=limit,
         start_date=start_dt,
         end_date=end_dt,
+        topic_context=keyword.topic_context,
     )
 
     return {
@@ -805,6 +807,7 @@ async def quick_scrape(
         limit=scrape_limit,
         start_date=start_dt,
         end_date=end_dt,
+        topic_context=req.topic_context or keyword.topic_context,
     )
 
     return {
@@ -930,6 +933,7 @@ async def _launch_all_platforms(
     limit: int = DEFAULT_SCRAPE_LIMIT,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    topic_context: Optional[str] = None,
 ):
     """Background coroutine: launches Apify actors for each platform and starts auto-pollers."""
     current_task = asyncio.current_task()
@@ -944,6 +948,7 @@ async def _launch_all_platforms(
             "keyword_id": str(keyword_id),
             "start_date": start_date.isoformat() if start_date else None,
             "end_date": end_date.isoformat() if end_date else None,
+            "topic_context": topic_context,
         })
     except Exception:
         pass
@@ -959,6 +964,7 @@ async def _launch_all_platforms(
                     limit=limit,
                     start_date=start_date,
                     end_date=end_date,
+                    topic_context=topic_context,
                 )
                 run_id = run.get("id")
                 if run_id:

@@ -50,24 +50,47 @@ async def process_apify_dataset_task(
                 logger.warning(f"Apify dataset {dataset_id} returned 0 items.")
                 return
 
+            kw_topic_context = (keyword.topic_context or "").strip().lower()
+
             def is_relevant(text_to_check: str, kw_str: str) -> bool:
                 t_lower = (text_to_check or "").lower()
                 k_clean = kw_str.replace("#", "").strip().lower()
                 if not k_clean or not t_lower:
                     return False
+                
+                # 1. Base keyword match
+                has_base_match = False
                 if k_clean in t_lower:
-                    return True
-                stop_words = {"the", "a", "an", "in", "at", "on", "of", "and", "to", "for", "with", "by", "is", "my", "your"}
-                tokens = [t for t in k_clean.split() if t not in stop_words and len(t) >= 2]
-                if not tokens:
-                    return True
-                if len(tokens) == 1:
-                    return tokens[0] in t_lower
-                if len(tokens) >= 2:
-                    if f"{tokens[0]} {tokens[1]}" in t_lower:
+                    has_base_match = True
+                else:
+                    stop_words = {"the", "a", "an", "in", "at", "on", "of", "and", "to", "for", "with", "by", "is", "my", "your"}
+                    tokens = [t for t in k_clean.split() if t not in stop_words and len(t) >= 2]
+                    if not tokens:
+                        has_base_match = True
+                    elif len(tokens) == 1:
+                        has_base_match = tokens[0] in t_lower
+                    elif len(tokens) >= 2:
+                        if f"{tokens[0]} {tokens[1]}" in t_lower:
+                            has_base_match = True
+                        else:
+                            matches = sum(1 for t in tokens if t in t_lower)
+                            has_base_match = matches >= (1 if len(tokens) <= 2 else 2)
+
+                if not has_base_match:
+                    return False
+
+                # 2. Contextual noise filtering: If business topic context is specified (e.g. 'game centers', 'TRX pop up'),
+                # filter out obvious homonym collisions (e.g. music songs, truck models) unless they match the topic
+                if kw_topic_context:
+                    topic_tokens = [s.strip() for s in kw_topic_context.replace(";", ",").split(",") if len(s.strip()) >= 2]
+                    matches_topic = any(tt in t_lower for tt in topic_tokens)
+                    if matches_topic:
                         return True
-                matches = sum(1 for t in tokens if t in t_lower)
-                return matches >= (1 if len(tokens) <= 2 else 2)
+                    music_noise = {"music video", "album", "rhythm nation", "janet jackson", "lyrics"}
+                    if any(mn in t_lower for mn in music_noise):
+                        return False
+
+                return True
 
             # 3. Parse & filter for genuine relevance and timeline bounds
             scraped_records = []
