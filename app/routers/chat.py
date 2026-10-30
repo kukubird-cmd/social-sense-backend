@@ -95,19 +95,19 @@ async def chat_with_database(req: ChatRequest, db: AsyncSession = Depends(get_db
         d["keyword_string"] = kw_str
         all_fetched.append(d)
 
-    # 3. Strict Keyword Isolation: Ensure comments NEVER mix across different keywords
-    if not req.keyword_id:
-        matched_kw = None
-        for item in all_fetched:
-            kw_name = item.get("keyword_string", "").replace("#", "").strip().lower()
-            if kw_name and len(kw_name) >= 3 and kw_name in msg_lower:
-                matched_kw = item.get("keyword_string")
-                break
-        
-        target_kw = matched_kw or active_keyword_str
-        if target_kw:
-            active_keyword_str = target_kw
-            all_fetched = [r for r in all_fetched if r.get("keyword_string", "").lower() == target_kw.lower()]
+    # 3. Keyword Scoping & Cross-Correlation
+    # If a specific keyword_id is forced, scope to it. Otherwise, allow multi-keyword correlation across the company's workspace.
+    if req.keyword_id and active_keyword_str:
+        all_fetched = [r for r in all_fetched if r.get("keyword_string", "").lower() == active_keyword_str.lower()]
+    else:
+        # Cross-keyword intelligence: sort posts so those mentioning key query tokens appear first
+        query_words = [w for w in msg_lower.split() if len(w) >= 3 and w not in {"the", "and", "for", "with", "from", "held", "event", "analyze", "what", "how", "has"}]
+        if query_words:
+            def relevance_score(r):
+                txt = (r.get("comment_text") or "").lower()
+                matches = sum(1 for qw in query_words if qw in txt)
+                return matches
+            all_fetched.sort(key=relevance_score, reverse=True)
 
     if not all_fetched:
         return {
