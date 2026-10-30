@@ -327,21 +327,18 @@ def _build_actor_input(
     return {}
 
 
-async def _trigger_actor(
-    platform: str,
-    keyword_string: str,
+async def _trigger_raw_actor(
+    actor_id_raw: str,
+    actor_input: dict,
     keyword_id: uuid.UUID,
     webhook_base_url: Optional[str] = None,
-    limit: int = DEFAULT_SCRAPE_LIMIT,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> dict:
     """
-    Launches a single Apify Actor run for the given platform + keyword.
-    Supports automatic quota failover: if the primary token hits quota/payment limits (HTTP 402, 429, etc.),
-    it seamlessly fails over and retries immediately with backup Apify token(s).
+    Generic runner that launches an Apify Actor run with token pool quota failover and retry logic.
     """
-    actor_id = APIFY_ACTORS[platform].replace("/", "~")
+    actor_id = actor_id_raw.replace("/", "~")
     candidate_tokens = token_pool.get_candidate_tokens()
     if not candidate_tokens:
         tok = _get_clean_token()
@@ -351,7 +348,6 @@ async def _trigger_actor(
     if not candidate_tokens:
         raise RuntimeError("No Apify API tokens configured on server.")
 
-    actor_input = _build_actor_input(platform, keyword_string, limit=limit, start_date=start_date, end_date=end_date)
     last_err = None
 
     for token_idx, token in enumerate(candidate_tokens):
@@ -386,19 +382,126 @@ async def _trigger_actor(
                     if resp.status_code in (200, 201):
                         return resp.json().get("data", {})
 
-                    # Check for quota, payment, or rate-limit exhaustion
                     if token_pool.is_quota_or_billing_error(resp.status_code, resp.text):
                         token_pool.mark_exhausted(token, f"Actor launch HTTP {resp.status_code}: {resp.text[:150]}")
                         last_err = f"Apify quota reached on token #{token_idx+1}: {resp.text[:200]}"
-                        break  # Break inner attempt to try next candidate backup token immediately
+                        break
 
-                    last_err = f"Apify returned {resp.status_code} for {platform}: {resp.text[:300]}"
+                    last_err = f"Apify returned {resp.status_code} for {actor_id_raw}: {resp.text[:300]}"
                 except Exception as e:
                     last_err = str(e)
                 if attempt < 1:
                     await asyncio.sleep(1.0)
 
-    raise RuntimeError(last_err or f"Failed to trigger {platform} across all configured Apify tokens")
+    raise RuntimeError(last_err or f"Failed to trigger {actor_id_raw} across all configured Apify tokens")
+
+
+async def _trigger_actor(
+    platform: str,
+    keyword_string: str,
+    keyword_id: uuid.UUID,
+    webhook_base_url: Optional[str] = None,
+    limit: int = DEFAULT_SCRAPE_LIMIT,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """
+    Launches a single Apify Actor run for the given platform + keyword.
+    """
+    actor_id_raw = APIFY_ACTORS[platform]
+    actor_input = _build_actor_input(platform, keyword_string, limit=limit, start_date=start_date, end_date=end_date)
+    return await _trigger_raw_actor(
+        actor_id_raw=actor_id_raw,
+        actor_input=actor_input,
+        keyword_id=keyword_id,
+        webhook_base_url=webhook_base_url,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+async def _trigger_comments_for_platform(
+    platform: str,
+    dataset_id: str,
+    keyword_id: uuid.UUID,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    """
+    After video/post search runs complete, automatically pulls viewer comments for top posts.
+    """
+    try:
+        from app.services.apify_service import fetch_apify_dataset_items
+        raw_items = await fetch_apify_dataset_items(dataset_id)
+        if not raw_items:
+            return
+
+        if platform == "tiktok":
+            video_urls = []
+            for item in raw_items:
+                v_url = item.get("postPage") or item.get("webVideoUrl")
+                if v_url and v_url not in video_urls:
+                    video_urls.append(v_url)
+
+            if not video_urls:
+                return
+
+            target_urls = video_urls[:10]
+            logger.info(f"💬 Launching TikTok viewer comment scraper for top {len(target_urls)} videos...")
+            comment_input = {
+                "postURLs": target_urls,
+                "commentsPerPost": 25,
+                "maxRepliesPerComment": 0
+            }
+            c_run = await _trigger_raw_actor(
+                "clockworks/tiktok-comments-scraper",
+                comment_input,
+                keyword_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            c_run_id = c_run.get("id")
+            if c_run_id:
+                _ACTIVE_RUN_IDS.add(c_run_id)
+                poller = asyncio.create_task(
+                    _poll_and_ingest_run(c_run_id, keyword_id, "tiktok", start_date=start_date, end_date=end_date, is_comment_run=True)
+                )
+                _ACTIVE_SCRAPE_TASKS.add(poller)
+                poller.add_done_callback(lambda t: _ACTIVE_SCRAPE_TASKS.discard(t))
+
+        elif platform == "instagram":
+            post_urls = []
+            for item in raw_items:
+                url = item.get("url")
+                if url and "instagram.com/p/" in url and url not in post_urls:
+                    post_urls.append(url)
+
+            if not post_urls:
+                return
+
+            target_urls = post_urls[:10]
+            logger.info(f"💬 Launching Instagram viewer comment scraper for top {len(target_urls)} posts...")
+            comment_input = {
+                "directUrls": target_urls,
+                "resultsLimit": 25
+            }
+            c_run = await _trigger_raw_actor(
+                "apify/instagram-comment-scraper",
+                comment_input,
+                keyword_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            c_run_id = c_run.get("id")
+            if c_run_id:
+                _ACTIVE_RUN_IDS.add(c_run_id)
+                poller = asyncio.create_task(
+                    _poll_and_ingest_run(c_run_id, keyword_id, "instagram", start_date=start_date, end_date=end_date, is_comment_run=True)
+                )
+                _ACTIVE_SCRAPE_TASKS.add(poller)
+                poller.add_done_callback(lambda t: _ACTIVE_SCRAPE_TASKS.discard(t))
+    except Exception as e:
+        logger.warning(f"Could not trigger secondary comments for {platform}: {e}")
 
 
 async def _poll_and_ingest_run(
@@ -407,6 +510,7 @@ async def _poll_and_ingest_run(
     platform: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    is_comment_run: bool = False,
 ):
     """
     Bulletproof automatic background poller:
@@ -414,11 +518,12 @@ async def _poll_and_ingest_run(
     and broadcasts to WebSockets. Does NOT require any public ngrok tunnel!
     """
     token = _get_clean_token()
-    max_wait_seconds = 600  # Up to 10 minutes for large runs (1000 items)
+    max_wait_seconds = 600  # Up to 10 minutes for large runs
     interval = 8
     elapsed = 0
 
-    logger.info(f"⏳ Monitoring [{platform}] run {run_id} in background (auto-ingest poller active)...")
+    run_type_label = "comments" if is_comment_run else "search"
+    logger.info(f"⏳ Monitoring [{platform} {run_type_label}] run {run_id} in background (auto-ingest poller active)...")
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             while elapsed < max_wait_seconds:
@@ -431,7 +536,7 @@ async def _poll_and_ingest_run(
                         run_status = data.get("status")
                         if run_status == "SUCCEEDED":
                             dataset_id = data.get("defaultDatasetId")
-                            logger.info(f"🎉 Apify [{platform}] run {run_id} SUCCEEDED! Ingesting dataset {dataset_id}...")
+                            logger.info(f"🎉 Apify [{platform} {run_type_label}] run {run_id} SUCCEEDED! Ingesting dataset {dataset_id}...")
                             if dataset_id:
                                 await process_apify_dataset_task(
                                     dataset_id=dataset_id,
@@ -439,9 +544,20 @@ async def _poll_and_ingest_run(
                                     start_date=start_date,
                                     end_date=end_date,
                                 )
+                                # If this was a primary search run for TikTok or Instagram, trigger viewer comments
+                                if not is_comment_run and platform in ("tiktok", "instagram"):
+                                    asyncio.create_task(
+                                        _trigger_comments_for_platform(
+                                            platform=platform,
+                                            dataset_id=dataset_id,
+                                            keyword_id=keyword_id,
+                                            start_date=start_date,
+                                            end_date=end_date,
+                                        )
+                                    )
                             return
                         elif run_status in ("FAILED", "ABORTED", "TIMED-OUT"):
-                            logger.warning(f"Apify [{platform}] run {run_id} ended with status: {run_status}")
+                            logger.warning(f"Apify [{platform} {run_type_label}] run {run_id} ended with status: {run_status}")
                             return
                 except asyncio.CancelledError:
                     raise

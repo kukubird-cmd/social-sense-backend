@@ -75,9 +75,12 @@ async def process_apify_dataset_task(
             out_of_timeline_count = 0
             for item in raw_items:
                 try:
-                    # Check parent post context for relevance
+                    # Check parent post context for relevance (including hashtags)
+                    tags = item.get("hashtags") or []
+                    tags_str = " ".join(tags) if isinstance(tags, list) else str(tags)
                     parent_text = (
                         str(item.get("text") or item.get("desc") or item.get("title") or item.get("caption") or "")
+                        + " " + tags_str
                     )
                     parent_is_relevant = is_relevant(parent_text, keyword.keyword_string)
                     
@@ -104,16 +107,20 @@ async def process_apify_dataset_task(
                                 out_of_timeline_count += 1
                                 continue
 
-                        # YouTube comment scrapers target videos matching the keyword query directly.
+                        # Viewer comments and replies target specific keyword-matched posts.
                         # Viewers rarely repeat the full keyword in short reactions ("Subscribed!", "Where is this?").
-                        # Keep comments from keyword-targeted YouTube scraper runs, or any post/comment matching the keyword.
-                        is_targeted_comment = (
-                            r.platform == "youtube"
-                            or item.get("datasetType") == "comment"
+                        # Always preserve genuine comments from targeted runs or relevant parent posts.
+                        post_type = (r.engagement_metrics or {}).get("post_type", "")
+                        is_viewer_comment = (
+                            post_type in ("comment", "reply")
+                            or r.platform == "youtube"
+                            or item.get("datasetType") in ("comment", "instagram-comment")
                             or "videoId" in item
                             or "commentId" in item
+                            or "cid" in item
+                            or "commentUrl" in item
                         )
-                        if is_targeted_comment or parent_is_relevant or is_relevant(r.comment_text, keyword.keyword_string):
+                        if is_viewer_comment or parent_is_relevant or is_relevant(r.comment_text, keyword.keyword_string):
                             scraped_records.append(r)
                         else:
                             irrelevant_count += 1

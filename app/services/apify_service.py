@@ -232,20 +232,42 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
             "post_type": "post",
             "author": author
         }
-    elif "commentText" in item and ("videoWebUrl" in item or "tiktok" in str(item).lower()):
+    # TikTok comments (from clockworks/tiktok-comments-scraper, apidojo/tiktok-comments-scraper, etc.)
+    elif ("cid" in item or "commentText" in item or "replyCommentTotal" in item) and ("videoWebUrl" in item or "submittedVideoUrl" in item or "uniqueId" in item or "tiktok" in str(item).lower()):
         platform = "tiktok"
         is_comment = True
-        post_url = item.get("videoWebUrl", "")
-        comment_text = item.get("commentText") or item.get("text", "")
-        author = item.get("user", {}).get("nickname") or item.get("author") or "TikTok Commenter"
+        post_url = item.get("videoWebUrl") or item.get("submittedVideoUrl") or ""
+        comment_text = item.get("text") or item.get("commentText") or ""
+        raw_author = item.get("uniqueId") or item.get("user", {}).get("nickname") or item.get("author") or "TikTok Commenter"
+        author = f"@{raw_author}" if not str(raw_author).startswith("@") else str(raw_author)
         metrics = {
-            "likes": item.get("diggCount", 0) or item.get("likesCount", 0),
-            "replies": item.get("replyCommentTotal", 0),
+            "likes": item.get("diggCount", 0) or item.get("likesCount", 0) or 0,
+            "replies": item.get("replyCommentTotal", 0) or 0,
             "post_type": "comment",
-            "author": author
+            "author": author,
+            "is_owned_media": False
         }
 
-    # --- 4. INSTAGRAM DETECTION ---
+    # Dedicated Instagram comments (from apify/instagram-comment-scraper or direct comment items)
+    elif (
+        "commentUrl" in item
+        or ("ownerUsername" in item and "text" in item and ("postUrl" in item or "shortCode" in item or "instagram.com" in str(item.get("postUrl", ""))))
+        or item.get("datasetType") == "instagram-comment"
+    ):
+        platform = "instagram"
+        is_comment = True
+        post_url = item.get("postUrl") or item.get("commentUrl") or (f"https://www.instagram.com/p/{item.get('shortCode')}/" if item.get("shortCode") else "https://www.instagram.com")
+        comment_text = item.get("text") or item.get("comment") or ""
+        author = item.get("ownerUsername") or item.get("author") or "Instagram Commenter"
+        metrics = {
+            "likes": item.get("likesCount", 0) or item.get("likes", 0) or 0,
+            "replies": item.get("repliesCount", 0) or 0,
+            "post_type": "comment",
+            "author": author,
+            "is_owned_media": False
+        }
+
+    # --- 4. INSTAGRAM POST DETECTION ---
     elif "instagram" in item.get("url", "") or "shortCode" in item or ("caption" in item and "likesCount" in item):
         platform = "instagram"
         post_url = item.get("url") or f"https://www.instagram.com/p/{item.get('shortCode', '')}/"
@@ -265,8 +287,16 @@ def parse_apify_item_to_records(item: Dict[str, Any], keyword_id: uuid.UUID) -> 
             except Exception:
                 pass
 
-        # Check for firstComment or latestComments
-        comments_arr = item.get("latestComments") or item.get("comments") or []
+        # Check for latestComments or comments array
+        comments_arr = list(item.get("latestComments") or item.get("comments") or [])
+        # Also check firstComment if not already in comments_arr
+        first_c = item.get("firstComment")
+        if first_c:
+            if isinstance(first_c, dict) and first_c not in comments_arr:
+                comments_arr.append(first_c)
+            elif isinstance(first_c, str) and first_c.strip():
+                comments_arr.append({"text": first_c.strip(), "ownerUsername": author, "likesCount": 0})
+
         for c in comments_arr:
             c_text = c.get("text") or c.get("comment") or ""
             if c_text.strip():
