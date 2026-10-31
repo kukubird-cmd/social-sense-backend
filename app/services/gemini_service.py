@@ -9,10 +9,12 @@ logger = logging.getLogger("gemini_service")
 
 # Candidate models in order of priority (with automatic fallback)
 GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-flash-latest"
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-pro-latest",
+    "gemini-3-flash-preview"
 ]
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -20,6 +22,7 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 import codecs
 import re
+import ast
 
 def unescape_unicode(s: str) -> str:
     """Decodes raw \\uXXXX unicode escapes and UTF-16 surrogate pairs into genuine UTF-8 characters."""
@@ -144,76 +147,50 @@ async def call_gemini_api(prompt: str, system_instruction: Optional[str] = None)
         raise ValueError("GEMINI_API_KEY is not configured in backend/.env")
 
     last_error = None
-    async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         for model in GEMINI_MODELS:
             url = f"{BASE_URL}/{model}:generateContent?key={api_key}"
             
-            # Use maxOutputTokens: 65536 to ensure thinking tokens never starve the response
-            payload_attempts = [
-                {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.3,
-                        "maxOutputTokens": 65536,
-                        "thinkingConfig": {"thinkingBudget": 0}
-                    }
-                },
-                {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.3,
-                        "maxOutputTokens": 65536
-                    }
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 8192
                 }
-            ]
+            }
+            if system_instruction:
+                payload["systemInstruction"] = {
+                    "parts": [{"text": system_instruction}]
+                }
 
-            for payload_idx, payload in enumerate(payload_attempts):
-                if system_instruction:
-                    payload["systemInstruction"] = {
-                        "parts": [{"text": system_instruction}]
-                    }
+            try:
+                response = await client.post(url, json=payload)
+                if response.status_code == 200:
+                    data = response.json()
+                    candidates = data.get("candidates", [])
+                    if candidates and "content" in candidates[0]:
+                        parts = candidates[0]["content"].get("parts", [])
+                        text_parts = [
+                            p.get("text", "")
+                            for p in parts
+                            if "text" in p and not p.get("thought", False)
+                        ]
+                        full_text = "".join(text_parts).strip()
+                        if full_text:
+                            return full_text
 
-                try:
-                    response = await client.post(url, json=payload)
-                    if response.status_code == 200:
-                        data = response.json()
-                        candidates = data.get("candidates", [])
-                        if candidates and "content" in candidates[0]:
-                            finish_reason = candidates[0].get("finishReason", "")
-                            parts = candidates[0]["content"].get("parts", [])
-                            
-                            # Concatenate ALL non-thought text parts to avoid dropping content
-                            text_parts = [
-                                p.get("text", "")
-                                for p in parts
-                                if "text" in p and not p.get("thought", False)
-                            ]
-                            full_text = "".join(text_parts).strip()
-
-                            if finish_reason == "MAX_TOKENS":
-                                logger.warning(f"Model {model} hit MAX_TOKENS limit (length: {len(full_text)})")
-                                # If truncated and we have another payload attempt, try next attempt
-                                if payload_idx + 1 < len(payload_attempts):
-                                    continue
-
-                            if full_text:
-                                return full_text
-
-                    elif response.status_code in (404, 503, 429):
-                        logger.warning(f"Model {model} returned HTTP {response.status_code}. Falling back...")
-                        last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                        break # Try next model
-                    elif response.status_code == 400 and "thinkingConfig" in str(payload):
-                        # Some models may reject thinkingConfig, try payload without it
-                        continue
-                    else:
-                        last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                        logger.warning(f"Gemini error with {model}: {last_error}")
-                        break
-                except Exception as e:
-                    last_error = str(e)
-                    logger.warning(f"Failed calling {model}: {e}")
-                    break
+                elif response.status_code in (404, 503, 429):
+                    logger.warning(f"Model {model} returned HTTP {response.status_code}. Falling back...")
+                    last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    continue
+                else:
+                    last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    logger.warning(f"Gemini error with {model}: {last_error}")
+                    continue
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Failed calling {model}: {e}")
+                continue
 
     raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
@@ -228,15 +205,39 @@ async def chat_with_scraped_data(
     Answers user queries grounded strictly on the database of scraped social media posts,
     with topic disambiguation and precision filtering.
     """
-    # Prioritize genuine viewer comments & earned media; retain all records without hardcoded caps
+    # Smart curation: When database has hundreds or thousands of records, select the top most
+    # relevant, authentic, and high-signal viewer comments to avoid hitting free-tier TPM quota limits.
+    MAX_PROMPT_RECORDS = 180
+
     earned_records = [r for r in scraped_records if not r.get("is_owned_media")]
     owned_records = [r for r in scraped_records if r.get("is_owned_media")]
-    
-    # Include all scraped records (genuine viewer comments + owned posts)
-    prioritized_records = earned_records + owned_records if earned_records else scraped_records
+
+    # Extract user query tokens for relevance scoring
+    query_tokens = [w for w in re.findall(r'\b\w{3,}\b', user_query.lower()) if w not in {"the", "and", "for", "with", "from", "held", "event", "analyze", "what", "how", "has", "tell", "show", "give", "please", "about"}]
+
+    def calc_relevance(r):
+        score = 0.0
+        text = (r.get("comment_text") or "").lower()
+        if not r.get("is_owned_media"):
+            score += 2.0  # Strongly prioritize authentic customer/viewer feedback
+        for qt in query_tokens:
+            if qt in text:
+                score += 3.0
+        if len(text) > 30:
+            score += 1.0
+        return score
+
+    earned_sorted = sorted(earned_records, key=calc_relevance, reverse=True)
+    owned_sorted = sorted(owned_records, key=calc_relevance, reverse=True)
+
+    selected_records = earned_sorted[:MAX_PROMPT_RECORDS - 15]
+    if owned_sorted:
+        selected_records += owned_sorted[:15]
+    elif not selected_records:
+        selected_records = scraped_records[:MAX_PROMPT_RECORDS]
 
     cleaned_records = []
-    for r in prioritized_records:
+    for r in selected_records:
         text = clean_text(r.get("comment_text", ""))
         platform = r.get("platform", "unknown")
         sentiment = r.get("sentiment_score", "Neutral")
@@ -245,14 +246,21 @@ async def chat_with_scraped_data(
         is_owned = bool(r.get("is_owned_media") or metrics.get("is_owned_media", False))
         raw_ts = str(r.get("timestamp") or "")
         orig_date = metrics.get("publishedTimeText") or metrics.get("publishedAt") or (raw_ts[:10] if raw_ts else "Recent")
+        
+        # Keep metrics concise to optimize token budget
+        condensed_metrics = {}
+        for k in ("likes", "comments", "views", "shares", "likeCount", "commentCount", "viewCount"):
+            if k in metrics and metrics[k] is not None:
+                condensed_metrics[k] = metrics[k]
+
         cleaned_records.append({
             "platform": platform,
             "sentiment": sentiment,
             "media_type": "Owned Promotional Copy" if is_owned else "Viewer/User Comment",
             "author": author,
             "date": str(orig_date)[:25],
-            "content": text[:1500],
-            "metrics": metrics,
+            "content": text[:800],
+            "metrics": condensed_metrics if condensed_metrics else None,
             "url": r.get("post_url", "")
         })
 
@@ -319,8 +327,6 @@ INSTRUCTIONS FOR YOUR RESPONSE:
     reply = linkify_citations(reply, cleaned_records)
 
     # Extract structured topic options if present (supports JSON, Python list, and fallback)
-    import re
-    import ast
     topic_options = []
     options_match = re.search(r"(?:[-#*=\s]*TOPIC[-_\s]*OPTIONS[-#*=\s]*:?\s*)(\[[^\]]+\])", reply, re.IGNORECASE)
     if options_match:
